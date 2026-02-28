@@ -1,0 +1,13 @@
+aiosqlite
+fastapi
+uvicorn
+asyncpg
+httpx
+beautifulsoup4
+playwright
+feedparser
+python-dateutil
+pydantic
+groq
+python-dotenv
+apscheduler
