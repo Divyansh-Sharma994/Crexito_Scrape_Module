@@ -125,6 +125,7 @@ async def export_csv(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     has_body: Optional[bool] = None,
+    search: Optional[str] = None,
 ):
     """FIX #13: Streaming CSV export — never loads entire dataset into RAM."""
     conditions = []
@@ -143,6 +144,9 @@ async def export_csv(
         conditions.append(f"published_at <= ${i}"); params.append(str(date_to)); i += 1
     if has_body is True:
         conditions.append("full_body IS NOT NULL AND length(full_body) > 100")
+    if search:
+        conditions.append(f"(title ILIKE ${i} OR full_body ILIKE ${i+1})")
+        params.extend([f"%{search}%", f"%{search}%"]); i += 2
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
@@ -193,6 +197,7 @@ async def export_xlsx(
     job_id: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    search: Optional[str] = None,
 ):
     """Generates an Excel (XLSX) file containing the filtered articles."""
     from openpyxl import Workbook
@@ -208,6 +213,9 @@ async def export_xlsx(
         conditions.append(f"published_at >= ${i}"); params.append(str(date_from)); i += 1
     if date_to and date_to != "": 
         conditions.append(f"published_at <= ${i}"); params.append(str(date_to)); i += 1
+    if search:
+        conditions.append(f"(title ILIKE ${i} OR full_body ILIKE ${i+1})")
+        params.extend([f"%{search}%", f"%{search}%"]); i += 2
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
     async with get_db() as db:
@@ -253,6 +261,7 @@ async def export_json(
     job_id: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    search: Optional[str] = None,
 ):
     """Stream articles as newline-delimited JSON."""
     conditions = []
@@ -263,6 +272,9 @@ async def export_json(
     if job_id: conditions.append(f"scrape_job_id = ${i}"); params.append(job_id); i += 1
     if date_from and date_from != "": conditions.append(f"published_at >= ${i}"); params.append(date_from); i += 1
     if date_to and date_to != "": conditions.append(f"published_at <= ${i}"); params.append(date_to); i += 1
+    if search:
+        conditions.append(f"(title ILIKE ${i} OR full_body ILIKE ${i+1})")
+        params.extend([f"%{search}%", f"%{search}%"]); i += 2
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
     import json as _json
