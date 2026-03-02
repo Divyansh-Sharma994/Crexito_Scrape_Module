@@ -22,11 +22,13 @@ import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 import feedparser
+import trafilatura
 from urllib.parse import quote_plus
 from db.database import get_db
 from concurrent.futures import ThreadPoolExecutor
+from playwright_stealth import Stealth
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEYS = [k.strip() for k in os.getenv("GROQ_API_KEY", "").split(",") if k.strip()]
 
 LOG_FILE = "scraper.log"
 
@@ -46,45 +48,79 @@ SECTOR_KEYWORDS = {
         "AI", "Artificial Intelligence", "Machine Learning", "Deep Learning", "LLM", "Generative AI", "NLP",
         "Robotics", "Neural Networks", "AGI", "OpenAI", "Anthropic", "DeepMind", "Mistral", "Cohere",
         "Sam Altman", "Demis Hassabis", "Ilya Sutskever", "Geoffrey Hinton", "Yann LeCun", "Andrew Ng",
-        "Jensen Huang", "NVIDIA AI", "Hugging Face", "ChatGPT", "Gemini", "Claude AI",
+        "Jensen Huang", "NVIDIA AI", "Hugging Face", "ChatGPT", "Gemini", "Claude AI", "Llama 3", "GPT-5",
+        "AI Safety", "AI Ethics", "Compute", "GPUs", "AI Startups", "AI Regulation", "AI Chips",
+        "Stable Diffusion", "Midjourney", "DALL-E", "Runway AI", "Pika Labs", "Sora AI", "Groq AI",
+        "TensorFlow", "PyTorch", "AutoGPT", "BabyAGI", "Vector Database", "Pinecone", "Milvus",
+        "Prompt Engineering", "RAG", "Retrieval Augmented Generation", "Fine-tuning", "LoRA",
+        "Q* Hypothesis", "Agentic Workflow", "AI Agents", "Perplexity AI", "Character.ai",
+        "Inflection AI", "Scale AI", "Data Annotation", "RLHF", "Synthetic Data", "AI PC",
+        "Copilot", "Azure AI", "AWS Bedrock", "Vertex AI", "Apple Intelligence", "X.AI", "Grok",
     ],
     "technology": [
         "Technology", "Software", "Hardware", "Cybersecurity", "Cloud Computing", "SaaS", "IoT", "5G",
         "Semiconductors", "Quantum Computing", "Metaverse", "Apple", "Microsoft", "Google", "Meta", "Amazon",
-        "Intel", "AMD", "TSMC", "Tesla", "Tim Cook", "Satya Nadella", "Sundar Pichai",
+        "Intel", "AMD", "TSMC", "Tesla", "Tim Cook", "Satya Nadella", "Sundar Pichai", "Open Source",
+        "Linux", "DevOps", "Web3", "AR/VR", "Silicon Valley", "Big Tech", "Data Privacy",
+        "Cloud Native", "Kubernetes", "Docker", "Serverless", "Edge Computing", "Blockchain",
+        "Ethereum", "Solana", "NFT", "Fintech", "Healthtech", "Proptech", "Edtech", "Adtech",
+        "Zero Trust", "Ransomware", "EDR", "SOC", "Pentesting", "Web Security", "App Sec",
+        "iPhone", "MacBook", "Vision Pro", "Android", "Pixel", "Windows 11", "Copilot PC",
+        "ASML", "NVIDIA", "Broadcom", "Qualcomm", "Arm Holdings", "Data Centers", "GPU Clusters",
     ],
     "finance": [
         "Finance", "Banking", "Fintech", "Stock Market", "Investment", "Venture Capital", "Cryptocurrency",
         "Blockchain", "Economy", "Inflation", "GDP", "Interest Rates", "Goldman Sachs", "JPMorgan",
         "BlackRock", "Federal Reserve", "RBI", "SEBI", "Coinbase", "Warren Buffett", "Jamie Dimon",
+        "NASDAQ", "NYSE", "Wall Street", "Digital Assets", "DeFi", "Central Bank", "Fiscal Policy",
+        "Hedge Funds", "Private Equity", "M&A", "Investment Banking", "Mutual Funds", "ETFs",
+        "Bull Market", "Bear Market", "Recession", "Quantitative Easing", "Debt Ceiling",
+        "Stripe", "Plaid", "Adyen", "Revolut", "Visa", "Mastercard", "Crypto Exchange",
     ],
     "business": [
         "Business", "Corporate", "Merger", "Acquisition", "Startup", "Entrepreneur", "Revenue", "Retail",
         "Supply Chain", "Manufacturing", "IPO", "Valuation", "Funding", "Series A", "Series B",
+        "Unicorn", "E-commerce", "Market Share", "Q1 Results", "Earnings Call", "Strategy", "CEO",
+        "Founders", "Incubator", "Accelerator", "Logistics", "Direct-to-Consumer", "B2B", "B2C",
+        "Gig Economy", "Remote Work", "Co-working", "Corporate Governance", "ESG", "Sustainability",
     ],
     "politics": [
         "Politics", "Government", "Election", "Policy", "Parliament", "Senate", "Diplomacy", "Geopolitics",
         "Democracy", "Legislation", "Cabinet", "Prime Minister", "President", "Foreign Policy",
+        "Sanctions", "United Nations", "NATO", "Border Security", "Human Rights", "Public Policy",
+        "White House", "Kremlin", "Downing Street", "European Union", "G7", "G20", "BRICS",
+        "Trade War", "Tariffs", "Geopolitical Tension", "Election 2024", "Political Campaign",
     ],
     "health": [
         "Healthcare", "Medicine", "Hospital", "Pharma", "Biotech", "Vaccine", "Disease", "Mental Health",
         "Clinical Trial", "Drug Approval", "FDA", "WHO", "Public Health", "Oncology", "Genetics",
+        "Longevity", "Biohacking", "Telemedicine", "MedTech", "Virology", "Pandemic",
+        "Diabetes", "Immunotherapy", "CRISPR", "Gene Editing", "Neurology", "Cardiology",
+        "Ozempic", "Wegovy", "Weight Loss Drugs", "Precision Medicine", "Aging Research",
     ],
     "environment": [
         "Climate Change", "Environment", "Sustainability", "Renewable Energy", "Carbon", "Pollution",
         "Solar", "Wind Energy", "EV", "Electric Vehicle", "Net Zero", "Green Energy", "COP", "IPCC",
+        "Biodiversity", "Recycling", "Circular Economy", "Oceans", "Wildlife", "Conservation",
+        "Carbon Credits", "Hydrogen Fuel", "Direct Air Capture", "Nuclear Fusion", "Grid Storage",
     ],
     "sports": [
         "Cricket", "Football", "IPL", "FIFA", "Olympics", "Tennis", "Basketball", "F1", "Formula 1",
         "Wimbledon", "Grand Slam", "Premier League", "Champions League", "BCCI", "Virat Kohli", "MS Dhoni",
+        "NFL", "NBA", "Golf", "Athletics", "Sports Tech", "Transfer News",
+        "World Cup", "Super Bowl", "Grand Prix", "E-sports", "Streaming Rights", "Sports Betting",
     ],
     "lifestyle": [
         "Lifestyle", "Wellness", "Fashion", "Travel", "Food", "Fitness", "Culture", "Luxury",
-        "Entertainment", "Movies", "Music", "Celebrity", "Gaming", "Streaming",
+        "Entertainment", "Movies", "Music", "Celebrity", "Gaming", "Streaming", "Art", "Design",
+        "Social Media", "Influencers", "Mental Wellbeing", "Hobbies", "Home Decor",
+        "Netflix", "TikTok", "Instagram", "Pop Culture", "Gen Z Trends", "Digital Nomad",
     ],
     "education": [
         "Education", "University", "School", "EdTech", "Students", "Learning", "Academia",
-        "Research", "STEM", "Scholarship", "Online Learning", "IIT", "IIM",
+        "Research", "STEM", "Scholarship", "Online Learning", "IIT", "IIM", "Higher Education",
+        "K-12", "Vocational Training", "Literacy", "E-learning", "Scientific Papers",
+        "Student Loans", "College Admissions", "Curriculum", "Pedagogy", "Lifelong Learning",
     ],
 }
 
@@ -92,16 +128,21 @@ SEARCH_MODIFIERS = [
     "news", "latest", "update", "report", "analysis", "market", "policy", "regulation",
     "research", "innovation", "trending", "forecast", "announcement", "investment",
     "funding", "startup", "expert", "interview", "review", "growth", "challenge", "impact",
+    "press release", "summit", "conference", "breakthrough", "scandal", "lawsuit",
+    "acquisition", "merger", "partnership", "collaboration", "patent", "earnings",
+    "exclusive", "leaked", "roadmap", "demo", "unveiled", "launched", "unveiling",
+    "rumor", "speculation", "leak", "investigation", "case study", "white paper",
 ]
 
 REGION_MAP = {
     "global":    {"geo": "US", "cities": []},
-    "india":     {"geo": "IN", "cities": ["Mumbai", "Delhi", "Bangalore", "Hyderabad", "Chennai", "Kolkata", "Pune", "Ahmedabad", "Surat", "Lucknow", "Indore", "Bhopal", "Patna"]},
-    "usa":       {"geo": "US", "cities": ["New York", "San Francisco", "Washington", "Chicago", "Los Angeles", "Austin", "Seattle", "Boston", "Dallas", "Houston", "Miami"]},
-    "uk":        {"geo": "GB", "cities": ["London", "Manchester", "Birmingham", "Edinburgh", "Glasgow"]},
-    "canada":    {"geo": "CA", "cities": ["Toronto", "Vancouver", "Montreal", "Ottawa", "Calgary"]},
-    "japan":     {"geo": "JP", "cities": ["Tokyo", "Osaka", "Kyoto", "Yokohama"]},
-    "australia": {"geo": "AU", "cities": ["Sydney", "Melbourne", "Brisbane", "Perth"]},
+    "india":     {"geo": "IN", "cities": ["Mumbai", "Delhi", "Bangalore", "Hyderabad", "Chennai", "Kolkata", "Pune", "Ahmedabad", "Surat", "Lucknow", "Indore", "Bhopal", "Patna", "Jaipur", "Chandigarh", "Kochi", "Gurgaon", "Noida"]},
+    "usa":       {"geo": "US", "cities": ["New York", "San Francisco", "Washington", "Chicago", "Los Angeles", "Austin", "Seattle", "Boston", "Dallas", "Houston", "Miami", "Denver", "Atlanta", "Phoenix", "Philadelphia"]},
+    "uk":        {"geo": "GB", "cities": ["London", "Manchester", "Birmingham", "Edinburgh", "Glasgow", "Liverpool", "Leeds", "Bristol"]},
+    "canada":    {"geo": "CA", "cities": ["Toronto", "Vancouver", "Montreal", "Ottawa", "Calgary", "Edmonton", "Quebec City"]},
+    "japan":     {"geo": "JP", "cities": ["Tokyo", "Osaka", "Kyoto", "Yokohama", "Nagoya", "Sapporo", "Fukuoka"]},
+    "australia": {"geo": "AU", "cities": ["Sydney", "Melbourne", "Brisbane", "Perth", "Adelaide", "Canberra", "Gold Coast"]},
+    "europe":    {"geo": "EU", "cities": ["Berlin", "Paris", "Madrid", "Rome", "Amsterdam", "Brussels", "Vienna", "Zurich", "Stockholm", "Dublin"]},
 }
 
 # FIX #8: 8 rotating User-Agents
@@ -125,16 +166,84 @@ def title_hash(title: str) -> str:
     normalized = re.sub(r'\s+', ' ', normalized)[:120]
     return hashlib.md5(normalized.encode()).hexdigest()
 
+# Known high-volume sitemaps (News Publishers)
+NEWS_SITEMAPS = [
+    "https://www.nytimes.com/sitemaps/new/news.xml.gz",
+    "https://www.theguardian.com/sitemaps/news.xml",
+    "https://www.reuters.com/arc/outboundfeeds/news-sitemap-index/?outputType=xml",
+    "https://economictimes.indiatimes.com/sitemapindex.xml",
+    "https://www.livemint.com/sitemap/news.xml",
+    "https://www.hindustantimes.com/sitemap/news.xml",
+    "https://www.bbc.co.uk/sitemaps/news-sitemap-index.xml",
+    "https://www.aljazeera.com/sitemap_news.xml",
+    "https://www.forbes.com/news-sitemap.xml",
+    "https://www.wsj.com/sitemaps/news.xml",
+]
+
+# ─── Sitemap Logic ─────────────────────────────────────────────────────────────
+
+async def fetch_sitemaps(client: httpx.AsyncClient, day: date, keywords: List[str]) -> List[dict]:
+    """Scrapes top news sitemaps and filters by date and keyword."""
+    results = []
+    seen_urls = set()
+    
+    async def process_one_sitemap(url: str):
+        try:
+            resp = await client.get(url, timeout=15)
+            if resp.status_code != 200: return
+            
+            # Simple XML parsing via regex/trafilatura for speed
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(resp.content)
+            
+            # XML Namespaces
+            ns = {'s': 'http://www.sitemaps.org/schemas/sitemap/0.9',
+                  'n': 'http://www.google.com/schemas/sitemap-news/0.9'}
+            
+            for url_tag in root.findall('s:url', ns):
+                loc = url_tag.find('s:loc', ns).text
+                news_tag = url_tag.find('n:news', ns)
+                if news_tag is not None:
+                    pub_date_tag = news_tag.find('n:publication_date', ns)
+                    title_tag = news_tag.find('n:title', ns)
+                    
+                    if pub_date_tag is not None and title_tag is not None:
+                        pub_date_str = pub_date_tag.text
+                        title = title_tag.text
+                        
+                        # Date filter
+                        try:
+                            pub_date = datetime.fromisoformat(pub_date_str.replace('Z', '+00:00')).date()
+                            if pub_date == day:
+                                # Keyword filter (broad)
+                                if any(kw.lower() in title.lower() for kw in keywords):
+                                    if loc not in seen_urls:
+                                        seen_urls.add(loc)
+                                        results.append({
+                                            "title": title,
+                                            "url": loc,
+                                            "published_at": pub_date_str,
+                                            "agency": news_tag.find('n:publication/n:name', ns).text if news_tag.find('n:publication/n:name', ns) is not None else "",
+                                            "title_hash": title_hash(title)
+                                        })
+                        except: pass
+        except Exception as e:
+            log(f"Sitemap error {url[:40]}: {e}")
+
+    tasks = [process_one_sitemap(s) for s in NEWS_SITEMAPS]
+    await asyncio.gather(*tasks)
+    return results
+
 # ─── Multi-Engine Discovery ────────────────────────────────────────────────────
 
 async def discover_articles(
-    queries: List[str], day: date, geo: str, job_id: Optional[str] = None
+    queries: List[str], day: date, geo: str, job_id: Optional[str] = None, keywords: List[str] = None
 ) -> List[dict]:
-    """Aggregates results from Google News RSS and Bing News RSS."""
+    """Aggregates results from Google News RSS, Bing News RSS, and News Sitemaps."""
     seen_urls: set = set()
     seen_title_hashes: set = set()
     articles: List[dict] = []
-    semaphore = asyncio.Semaphore(40)
+    semaphore = asyncio.Semaphore(25)  # Severely throttled to prevent dropping packets
     date_to = day + timedelta(days=1)
 
     async def fetch_engines(client: httpx.AsyncClient, query: str):
@@ -147,19 +256,20 @@ async def discover_articles(
 
             for url in [g_url, b_url]:
                 try:
-                    resp = await client.get(url, headers={"User-Agent": random_ua()}, timeout=10)
+                    # Let the AsyncClient handle the timeout configurations
+                    resp = await client.get(url, headers={"User-Agent": random_ua()})
                     if resp.status_code != 200:
                         continue
                     feed = await asyncio.get_event_loop().run_in_executor(executor, feedparser.parse, resp.text)
                     for entry in feed.entries:
                         link = entry.get("link")
                         title = entry.get("title", "").strip()
-                        if not link or link in seen_urls:
-                            continue
-                        # FIX #3: Skip duplicate titles from different URLs
+                        if not link: continue
+                        
                         th = title_hash(title)
-                        if th in seen_title_hashes:
+                        if link in seen_urls or th in seen_title_hashes:
                             continue
+                        
                         seen_urls.add(link)
                         seen_title_hashes.add(th)
                         
@@ -181,12 +291,13 @@ async def discover_articles(
                             "title_hash": th,
                         })
                 except Exception as e:
-                    # FIX #2: Log errors, never silently swallow
                     log(f"RSS fetch error for '{query[:40]}': {type(e).__name__}: {e}")
             return results
 
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-        chunk_size = 500
+    # Phase 1: RSS Discovery
+    limits = httpx.Limits(max_connections=200, max_keepalive_connections=50)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=30.0), limits=limits, follow_redirects=True) as client:
+        chunk_size = 50
         for i in range(0, len(queries), chunk_size):
             chunk = queries[i:i + chunk_size]
             tasks = [fetch_engines(client, q) for q in chunk]
@@ -205,16 +316,29 @@ async def discover_articles(
                     log(f"Progress update error: {e}")
             log(f"Discovery progress: {len(seen_urls)} unique URLs found so far...")
 
+    # Phase 2: Sitemap Discovery (High Quality)
+    if keywords:
+        log(f"Starting Sitemap discovery for {len(keywords)} keywords...")
+        async with httpx.AsyncClient(headers={"User-Agent": random_ua()}, timeout=30, limits=httpx.Limits(max_connections=150)) as client:
+            sitemap_articles = await fetch_sitemaps(client, day, keywords)
+            for a in sitemap_articles:
+                if a["url"] not in seen_urls:
+                    th = a["title_hash"]
+                    if th not in seen_title_hashes:
+                        seen_urls.add(a["url"])
+                        seen_title_hashes.add(th)
+                        articles.append(a)
+        log(f"Sitemap phase done: {len(sitemap_articles)} found via sitemaps.")
+
     return articles
 
 # ─── Groq Summarization (Rate-limit safe) ─────────────────────────────────────
 
 async def summarize_with_groq(text: str, client: httpx.AsyncClient) -> Optional[str]:
     """Groq LPU summarization with retry on rate-limit (Fix #8)."""
-    if not GROQ_API_KEY or not text or len(text) < 400:
+    if not GROQ_API_KEYS or not text or len(text) < 400:
         return None
     url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [
@@ -224,6 +348,8 @@ async def summarize_with_groq(text: str, client: httpx.AsyncClient) -> Optional[
         "max_tokens": 150,
     }
     for attempt in range(3):  # FIX #8: Retry up to 3 times
+        api_key = random.choice(GROQ_API_KEYS)
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         try:
             resp = await client.post(url, headers=headers, json=payload, timeout=15)
             if resp.status_code == 200:
@@ -247,11 +373,12 @@ async def scrape_and_analyze(
     groq_client: httpx.AsyncClient, scraped_counter: list
 ):
     """Fast scrape: direct browser visit only. Paywall bypass runs later via enrichment."""
-    from scraper.enrichment import extract_body_from_html, is_junk_body
+    from scraper.enrichment import extract_body_from_html, is_junk_body, extract_author_from_html
     context = None
     try:
         context = await browser.new_context(user_agent=random_ua())
         page = await context.new_page()
+        await Stealth().apply_stealth_async(page)
 
         # Block heavy resources — only load the HTML document
         await page.route("**/*", lambda r: r.continue_()
@@ -260,11 +387,37 @@ async def scrape_and_analyze(
 
         body = ""
         try:
-            await page.goto(article["url"], wait_until="domcontentloaded", timeout=15000)
-            await page.wait_for_timeout(500)
+            # Step 1: Navigate with better wait
+            await page.goto(article["url"], wait_until="networkidle", timeout=25000)
+            
+            # Step 2: Auto-scroll to trigger lazy loading
+            await page.evaluate("""async () => {
+                await new Promise((resolve) => {
+                    let totalHeight = 0;
+                    let distance = 100;
+                    let timer = setInterval(() => {
+                        let scrollHeight = document.body.scrollHeight;
+                        window.scrollBy(0, distance);
+                        totalHeight += distance;
+                        if(totalHeight >= scrollHeight){
+                            clearInterval(timer);
+                            resolve();
+                        }
+                    }, 100);
+                });
+            }""")
+            await page.wait_for_timeout(1000)
+
+            # Step 3: Extract content
             html = await page.content()
             body = extract_body_from_html(html)
+            author = extract_author_from_html(html)
+            
+            # Update URL if it changed (resolved redirect)
+            if page.url and page.url != article["url"] and "google.com" not in page.url:
+                article["url"] = page.url
         except Exception:
+            author = None
             pass  # Timeout / navigation error — save article with empty body
 
         # Validate body — discard junk (CAPTCHA pages, bot-detection, paywalls)
@@ -279,15 +432,16 @@ async def scrape_and_analyze(
             summary = await summarize_with_groq(body, groq_client)
 
         await db.execute("""
-            INSERT INTO articles (title, url, full_body, summary, agency, published_at, sector, region, scrape_job_id, word_count, title_hash)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            INSERT INTO articles (title, url, full_body, summary, agency, author, published_at, sector, region, scrape_job_id, word_count, title_hash)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (url) DO UPDATE SET
                 full_body  = CASE WHEN articles.full_body IS NULL OR length(articles.full_body) < 100 THEN excluded.full_body ELSE articles.full_body END,
                 summary    = CASE WHEN articles.summary IS NULL THEN excluded.summary ELSE articles.summary END,
                 word_count = CASE WHEN articles.word_count IS NULL OR articles.word_count = 0 THEN excluded.word_count ELSE articles.word_count END,
+                author     = CASE WHEN articles.author IS NULL OR articles.author = '' THEN excluded.author ELSE articles.author END,
                 title_hash = excluded.title_hash
         """, article["title"], article["url"], body, summary,
-             article["agency"], article["published_at"],
+             article["agency"], author, article["published_at"],
              sector, region, job_id, word_count, article.get("title_hash", ""))
 
         scraped_counter[0] += 1
@@ -350,7 +504,7 @@ async def run_scrape_job(
         try:
             current_day = date_from
             while current_day <= date_to:
-                log(f"Discovering {current_day.isoformat()}...")
+                log(f"Phase 1: Initial Discovery for {current_day.isoformat()}...")
                 queries = []
                 for kw in keywords:
                     for mod in SEARCH_MODIFIERS:
@@ -358,16 +512,45 @@ async def run_scrape_job(
                     for city in cities:
                         queries.append(f'"{kw}" {city}')
 
-                day_articles = await discover_articles(queries, current_day, geo, job_id)
+                # pass 1
+                day_articles = await discover_articles(queries, current_day, geo, job_id, keywords=keywords)
                 for a in day_articles:
                     if a["url"] not in seen_urls:
                         seen_urls.add(a["url"])
                         all_discovered.append(a)
+
+                # --- Phase 2: Recursive Trending Discovery ---
+                # Only if we found enough to find trends
+                if len(day_articles) > 50:
+                    log(f"Phase 2: Extracting trending topics for recursive discovery...")
+                    # Extract words from titles (excluding common stop words)
+                    all_titles = " ".join([a["title"] for a in day_articles])
+                    words = re.findall(r'\b[A-Z][a-z]{3,}\b|\b[A-Z0-9]{3,}\b', all_titles) # Proper nouns / Acronyms
+                    stop_words = {"The", "And", "With", "For", "That", "This", "From", "Into", "They", "Will"}
+                    trends = [w for w in words if w not in stop_words]
+                    
+                    # Get top 30 most frequent words
+                    from collections import Counter
+                    common_trends = [w for w, count in Counter(trends).most_common(30)]
+                    log(f"Trending keywords found: {', '.join(common_trends)}")
+                    
+                    recursive_queries = []
+                    for t in common_trends:
+                        recursive_queries.append(f'"{t}" {region}')
+                        recursive_queries.append(f'"{t}" news')
+
+                    recursive_articles = await discover_articles(recursive_queries, current_day, geo, job_id, keywords=None)
+                    log(f"Recursive discovery found {len(recursive_articles)} new articles.")
+                    for a in recursive_articles:
+                        if a["url"] not in seen_urls:
+                            seen_urls.add(a["url"])
+                            all_discovered.append(a)
+
                 current_day += timedelta(days=1)
 
         except Exception as e:
             # Discovery failed — still try to scrape what we already found
-            log(f"Discovery phase error (will scrape partial results): {e}")
+            log(f"Discovery phase error (will scrape partial results): {type(e).__name__}: {e}")
 
         total_found = len(all_discovered)
         log(f"Discovery complete: {total_found} unique URLs found.")
@@ -407,9 +590,9 @@ async def run_scrape_job(
                     args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-extensions"]
                 )
 
-                async with httpx.AsyncClient(timeout=20) as groq_client:
+                async with httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=100)) as groq_client:
                     async with get_db() as db:
-                        semaphore = asyncio.Semaphore(15)
+                        semaphore = asyncio.Semaphore(30)
 
                         async def sem_scrape(article):
                             async with semaphore:
@@ -522,7 +705,7 @@ async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_fro
                     else:
                         queries.append(f'"{brand}"')
             
-            day_articles = await discover_articles(queries, current_day, geo, job_id)
+            day_articles = await discover_articles(queries, current_day, geo, job_id, keywords=brands)
             for a in day_articles:
                 if a["url"] not in seen_urls:
                     # Tag with sector='__brand__' for internal filtering
@@ -545,7 +728,7 @@ async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_fro
         scraped_count = [0]
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-            async with httpx.AsyncClient() as groq_client:
+            async with httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=50)) as groq_client:
                 async with get_db() as db:
                     semaphore = asyncio.Semaphore(15)
 

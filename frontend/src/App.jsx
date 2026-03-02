@@ -20,19 +20,52 @@ export default function App() {
   const [page, setPage] = useState("dashboard");
   const [apiStatus, setApiStatus] = useState("checking"); // "online" | "offline" | "checking"
 
-  // Real health check — polls the backend every 10s
   useEffect(() => {
-    const check = async () => {
+    let ws;
+    let pollInterval;
+
+    const checkHealth = async () => {
       try {
-        const res = await fetch("/api/articles/stats/summary");
-        setApiStatus(res.ok ? "online" : "offline");
-      } catch {
+        const resp = await fetch("/api/diagnostics/health");
+        if (resp.ok) {
+          setApiStatus("online");
+        } else {
+          setApiStatus("offline");
+        }
+      } catch (err) {
         setApiStatus("offline");
       }
     };
-    check();
-    const interval = setInterval(check, 10000);
-    return () => clearInterval(interval);
+
+    const connect = () => {
+      const loc = window.location;
+      const protocol = loc.protocol === "https:" ? "wss:" : "ws:";
+      const host = loc.host;
+      ws = new WebSocket(`${protocol}//${host}/api/articles/ws/stats`);
+
+      ws.onmessage = (event) => {
+        setApiStatus("online");
+      };
+
+      ws.onerror = () => {
+        // Don't mark offline immediately, fallback to REST check
+        checkHealth();
+      };
+
+      ws.onclose = () => {
+        setTimeout(connect, 10000); // Wait longer between retries to avoid spam
+      };
+    };
+
+    connect();
+    // Periodic safety poll every 30s in case WS is dead but REST is alive
+    pollInterval = setInterval(checkHealth, 30000);
+    checkHealth(); // Initial check
+
+    return () => {
+      if (ws) ws.close();
+      if (pollInterval) clearInterval(pollInterval);
+    };
   }, []);
 
   const statusColor = apiStatus === "online" ? "var(--success)" : apiStatus === "offline" ? "var(--danger)" : "var(--warning)";

@@ -58,7 +58,7 @@ export default function ArticlesBrowser() {
   });
 
   useEffect(() => {
-    api.get("/scrape/options").then(setOptions).catch(() => {});
+    api.get("/scrape/options").then(setOptions).catch(() => { });
   }, []);
 
   const loadArticles = useCallback(async (pg = 1) => {
@@ -84,16 +84,10 @@ export default function ArticlesBrowser() {
     try {
       const full = await api.get(`/articles/${id}`);
       setSelected(full);
-    } catch {}
+    } catch { }
   };
 
   const setFilter = (k, v) => setFilters((f) => ({ ...f, [k]: v }));
-
-  const exportCsv = () => {
-    const params = {};
-    Object.entries(filters).forEach(([k, v]) => { if (v) params[k] = v; });
-    window.open(api.exportUrl(params), "_blank");
-  };
 
   return (
     <div>
@@ -142,9 +136,24 @@ export default function ArticlesBrowser() {
         <button className="btn btn-primary" onClick={() => loadArticles(1)} style={{ alignSelf: "flex-end" }}>
           Search
         </button>
-        <button className="btn btn-secondary" onClick={exportCsv} style={{ alignSelf: "flex-end" }}>
-          ↓ Export CSV
-        </button>
+        <a
+          className="btn btn-secondary"
+          href={api.exportUrl(filters)}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ alignSelf: "flex-end" }}
+        >
+          CSV
+        </a>
+        <a
+          className="btn btn-secondary"
+          href={api.exportXlsxUrl(filters)}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ alignSelf: "flex-end" }}
+        >
+          Excel
+        </a>
       </div>
 
       <div className="table-wrap">

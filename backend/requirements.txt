@@ -11,3 +11,7 @@ pydantic
 groq
 python-dotenv
 apscheduler
+playwright-stealth
+lxml
+trafilatura
+openpyxl

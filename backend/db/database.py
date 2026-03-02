@@ -225,6 +225,7 @@ async def get_db():
             # Ensure WAL is on for every connection
             await conn.execute("PRAGMA journal_mode=WAL")
             await conn.execute("PRAGMA synchronous=NORMAL")
+            await conn.execute("PRAGMA busy_timeout=10000") # 10s timeout
             yield DBConnection(conn)
     else:
         global _pg_pool

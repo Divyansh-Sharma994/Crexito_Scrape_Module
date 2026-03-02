@@ -1,10 +1,13 @@
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, WebSocket, WebSocketDisconnect
+import asyncio
 from fastapi.responses import StreamingResponse
 from db.database import get_db
 import csv
 import io
 from typing import Optional, AsyncGenerator
-from datetime import date
+from datetime import date, datetime
+
+_stats_cache = {"data": None, "timestamp": None}
 
 router = APIRouter()
 
@@ -74,7 +77,11 @@ async def get_articles(
 
 @router.get("/stats/summary")
 async def get_stats():
-    """Dashboard stats."""
+    """Dashboard stats with cache."""
+    now = datetime.now()
+    if _stats_cache["data"] and _stats_cache["timestamp"] and (now - _stats_cache["timestamp"]).total_seconds() < 10:
+        return _stats_cache["data"]
+
     async with get_db() as db:
         total = await db.fetchval("SELECT COUNT(*) FROM articles")
         with_body = await db.fetchval("SELECT COUNT(*) FROM articles WHERE full_body IS NOT NULL AND length(full_body) > 100")
@@ -84,7 +91,7 @@ async def get_stats():
         recent_jobs = await db.fetch("SELECT status, COUNT(*) as count FROM scrape_jobs GROUP BY status")
         latest = await db.fetchrow("SELECT MAX(scraped_at) as last_scraped FROM articles")
 
-    return {
+    res = {
         "total_articles": total or 0,
         "articles_with_body": with_body or 0,
         "articles_with_summary": with_summary or 0,
@@ -94,6 +101,20 @@ async def get_stats():
         "jobs_by_status": recent_jobs,
         "last_scraped": latest["last_scraped"] if latest else None,
     }
+    _stats_cache["data"] = res
+    _stats_cache["timestamp"] = now
+    return res
+
+@router.websocket("/ws/stats")
+async def ws_stats(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            stats = await get_stats()
+            await websocket.send_json(stats)
+            await asyncio.sleep(10)
+    except WebSocketDisconnect:
+        pass
 
 
 @router.get("/export/csv")
@@ -101,8 +122,8 @@ async def export_csv(
     sector: Optional[str] = None,
     region: Optional[str] = None,
     job_id: Optional[str] = None,
-    date_from: Optional[date] = None,
-    date_to: Optional[date] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     has_body: Optional[bool] = None,
 ):
     """FIX #13: Streaming CSV export — never loads entire dataset into RAM."""
@@ -116,9 +137,9 @@ async def export_csv(
         conditions.append(f"region = ${i}"); params.append(region); i += 1
     if job_id:
         conditions.append(f"scrape_job_id = ${i}"); params.append(job_id); i += 1
-    if date_from:
+    if date_from and date_from != "":
         conditions.append(f"published_at >= ${i}"); params.append(str(date_from)); i += 1
-    if date_to:
+    if date_to and date_to != "":
         conditions.append(f"published_at <= ${i}"); params.append(str(date_to)); i += 1
     if has_body is True:
         conditions.append("full_body IS NOT NULL AND length(full_body) > 100")
@@ -128,6 +149,9 @@ async def export_csv(
     CHUNK_SIZE = 500  # FIX #13: Process 500 rows at a time
 
     async def generate_csv() -> AsyncGenerator[bytes, None]:
+        # FIX: Add UTF-8 BOM for Excel compatibility
+        yield b'\xef\xbb\xbf'
+        
         header = io.StringIO()
         csv.writer(header).writerow(["Title", "URL", "Author", "Agency", "Published At", "Sector", "Region", "Word Count", "Summary", "Full Body"])
         yield header.getvalue().encode("utf-8")
@@ -162,13 +186,73 @@ async def export_csv(
     )
 
 
+@router.get("/export/xlsx")
+async def export_xlsx(
+    sector: Optional[str] = None,
+    region: Optional[str] = None,
+    job_id: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+):
+    """Generates an Excel (XLSX) file containing the filtered articles."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    
+    conditions = []
+    params = []
+    i = 1
+    if sector: conditions.append(f"sector = ${i}"); params.append(sector); i += 1
+    if region: conditions.append(f"region = ${i}"); params.append(region); i += 1
+    if job_id: conditions.append(f"scrape_job_id = ${i}"); params.append(job_id); i += 1
+    if date_from and date_from != "": 
+        conditions.append(f"published_at >= ${i}"); params.append(str(date_from)); i += 1
+    if date_to and date_to != "": 
+        conditions.append(f"published_at <= ${i}"); params.append(str(date_to)); i += 1
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    async with get_db() as db:
+        # We limit to 5000 for XLSX to avoid massive RAM usage
+        rows = await db.fetch(
+            f"SELECT title, url, author, agency, published_at, sector, region, word_count, summary "
+            f"FROM articles {where} ORDER BY published_at DESC LIMIT 5000",
+            *params
+        )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "NEXUS Scrape Results"
+    
+    headers = ["Title", "URL", "Author", "Agency", "Published At", "Sector", "Region", "Word Count", "AI Summary"]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    
+    for r in rows:
+        ws.append([
+            r["title"], r["url"], r.get("author"), r.get("agency"),
+            r.get("published_at"), r["sector"], r["region"],
+            r.get("word_count"), r.get("summary")
+        ])
+
+    from fastapi.responses import Response
+    output = io.BytesIO()
+    wb.save(output)
+    data = output.getvalue()
+    
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=articles_export.xlsx"}
+    )
+
+
 @router.get("/export/json")
 async def export_json(
     sector: Optional[str] = None,
     region: Optional[str] = None,
     job_id: Optional[str] = None,
-    date_from: Optional[date] = None,
-    date_to: Optional[date] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
 ):
     """Stream articles as newline-delimited JSON."""
     conditions = []
@@ -177,6 +261,8 @@ async def export_json(
     if sector: conditions.append(f"sector = ${i}"); params.append(sector); i += 1
     if region: conditions.append(f"region = ${i}"); params.append(region); i += 1
     if job_id: conditions.append(f"scrape_job_id = ${i}"); params.append(job_id); i += 1
+    if date_from and date_from != "": conditions.append(f"published_at >= ${i}"); params.append(date_from); i += 1
+    if date_to and date_to != "": conditions.append(f"published_at <= ${i}"); params.append(date_to); i += 1
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
     import json as _json

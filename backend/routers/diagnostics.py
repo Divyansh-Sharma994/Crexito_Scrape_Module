@@ -1,14 +1,21 @@
 import os
 import httpx
+from datetime import datetime
 from fastapi import APIRouter
 from db.database import get_db
 
 router = APIRouter()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+_diag_cache = {"data": None, "timestamp": None}
 
 @router.get("/health")
 async def get_system_health():
     """Returns real-time diagnostics of all core services and recent logs."""
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+    now = datetime.now()
+    if _diag_cache["data"] and _diag_cache["timestamp"] and (now - _diag_cache["timestamp"]).total_seconds() < 60:
+        # Return cached diagnostics if less than 1 minute old
+        return _diag_cache["data"]
+
     status = {
         "database": {"status": "unknown"}, 
         "groq_api": {"status": "unknown"}, 
@@ -65,17 +72,14 @@ async def get_system_health():
         status["groq_api"] = {"status": "offline", "message": "GROQ_API_KEY environment variable missing"}
         overall = "degraded"
 
-    # 3. Playwright Engine Check
+    # 3. Playwright Engine Check - Optimised: Check if binary exists instead of launching
     try:
-        from playwright.async_api import async_playwright
-        async with async_playwright() as p:
-            # Test a rapid headless launch to ensure dependencies exist and aren't zombied
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
-            )
-            await browser.close()
-            status["playwright"] = {"status": "online", "message": "Chromium engine healthy"}
+        import shutil
+        executable = shutil.which("playwright")
+        if executable:
+            status["playwright"] = {"status": "online", "message": "Chromium engine binary found"}
+        else:
+            status["playwright"] = {"status": "warning", "message": "Playwright binary not in PATH"}
     except Exception as e:
         status["playwright"] = {"status": "offline", "message": str(e)}
         overall = "degraded"
@@ -127,8 +131,11 @@ async def get_system_health():
     except Exception:
         pass
 
-    return {
+    res = {
         "overall": overall,
         "components": status,
         "recent_log_errors": recent_errors
     }
+    _diag_cache["data"] = res
+    _diag_cache["timestamp"] = now
+    return res

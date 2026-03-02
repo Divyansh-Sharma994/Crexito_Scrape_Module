@@ -37,8 +37,24 @@ export const api = {
     return response.json();
   },
 
+  _cleanParams(params) {
+    const clean = {};
+    if (!params) return "";
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== "") {
+        clean[k] = v;
+      }
+    });
+    return new URLSearchParams(clean).toString();
+  },
+
   exportUrl(params) {
-    const query = new URLSearchParams(params).toString();
+    const query = this._cleanParams(params);
     return `${API_BASE}/articles/export/csv?${query}`;
+  },
+
+  exportXlsxUrl(params) {
+    const query = this._cleanParams(params);
+    return `${API_BASE}/articles/export/xlsx?${query}`;
   }
 };
