@@ -1,6 +1,9 @@
 import uuid
 from datetime import date, timedelta
 from typing import List
+import io
+import csv
+from fastapi.responses import StreamingResponse
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from db.database import get_db
@@ -72,3 +75,42 @@ async def trigger_brand_scrape(background_tasks: BackgroundTasks, region: str = 
         )
 
         return {"job_id": job_id, "status": "queued", "brands": brand_list}
+
+@router.get("/download/{name}")
+async def download_brand_articles(name: str):
+    """Download all articles for a specific brand as CSV."""
+    async with get_db() as db:
+        # We query by checking if the sector field exactly matches the brand_name. 
+        # (This is due to the recent fix tagging them in engine.py)
+        articles = await db.fetch("SELECT * FROM articles WHERE sector=$1 ORDER BY published_at DESC", name)
+        
+        if not articles:
+            raise HTTPException(404, detail="No scraped articles found for this brand yet.")
+        
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Header
+        writer.writerow(["ID", "Title", "URL", "Author", "Agency", "Published_At", "Word_Count", "Summary", "Body_Preview"])
+        
+        for a in articles:
+            body_preview = a['full_body'][:300] + "..." if a.get('full_body') else ""
+            writer.writerow([
+                a['id'],
+                a['title'],
+                a['url'],
+                a.get('author', ''),
+                a.get('agency', ''),
+                a.get('published_at', ''),
+                a.get('word_count', 0),
+                a.get('summary', ''),
+                body_preview
+            ])
+            
+        output.seek(0)
+        
+        return StreamingResponse(
+            output,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={name.replace(' ', '_')}_articles.csv"}
+        )

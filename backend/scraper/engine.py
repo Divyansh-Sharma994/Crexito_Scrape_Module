@@ -279,6 +279,11 @@ async def discover_articles(
                                 from email.utils import parsedate_to_datetime
                                 dt = parsedate_to_datetime(raw_date)
                                 iso_date = dt.isoformat()
+                                # Date validation to prevent old articles
+                                article_date = dt.date()
+                                # Allow +/- 2 days due to timezone gaps from RSS
+                                if abs((article_date - day).days) > 2:
+                                    continue
                             except Exception:
                                 pass
 
@@ -437,10 +442,11 @@ async def scrape_and_analyze(
                 word_count = CASE WHEN articles.word_count IS NULL OR articles.word_count = 0 THEN excluded.word_count ELSE articles.word_count END,
                 author     = CASE WHEN articles.author IS NULL OR articles.author = '' THEN excluded.author ELSE articles.author END,
                 agency     = excluded.agency,
-                title_hash = excluded.title_hash
+                title_hash = excluded.title_hash,
+                sector     = CASE WHEN excluded.sector != 'brand_tracker' THEN excluded.sector ELSE articles.sector END
         """, article["title"], article["url"], body, summary,
              agency, author, article["published_at"],
-             sector, region, job_id, word_count, article.get("title_hash", ""))
+             article.get("brand_name", sector), region, job_id, word_count, article.get("title_hash", ""))
 
         scraped_counter[0] += 1
 
@@ -683,36 +689,39 @@ async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_fro
         seen_urls = set()
 
         # ── Gate 2: Focused Discovery ───────────────────────────────────────────
+        
+        # Massive pool of corporate modifiers to force search engines to return deeper results
+        modifiers = [
+            "", "news", "startup", "funding", "acquisition", "revenue", "IPO", "investment", "growth",
+            "fintech", "payments", "technology", "founder", "CEO", "valuation", "profit",
+            "loss", "market share", "partnership", "integration", "software", "update", "launch",
+            "feature", "hiring", "layoffs", "employees", "office", "expansion", "global",
+            "round", "series A", "series B", "series C", "unicorn", "decacorn", "economy",
+            "stocks", "shares", "board", "director", "resignation", "appointment", "award",
+            "recognition", "lawsuit", "regulation", "RBI", "compliance", "security", "breach"
+        ]
+
         current_day = date_from
         while current_day <= date_to:
             log(f"Searching brands for {current_day.isoformat()}...")
-            queries = []
-            
-            # Massive pool of corporate modifiers to force search engines to return deeper results
-            modifiers = [
-                "", "news", "startup", "funding", "acquisition", "revenue", "IPO", "investment", "growth",
-                "fintech", "payments", "technology", "founder", "CEO", "valuation", "profit",
-                "loss", "market share", "partnership", "integration", "software", "update", "launch",
-                "feature", "hiring", "layoffs", "employees", "office", "expansion", "global",
-                "round", "series A", "series B", "series C", "unicorn", "decacorn", "economy",
-                "stocks", "shares", "board", "director", "resignation", "appointment", "award",
-                "recognition", "lawsuit", "regulation", "RBI", "compliance", "security", "breach"
-            ]
             
             for brand in brands:
+                queries = []
                 for mod in modifiers:
                     if mod:
                         queries.append(f'"{brand}" {mod}')
                     else:
                         queries.append(f'"{brand}"')
-            
-            day_articles = await discover_articles(queries, current_day, geo, job_id, keywords=brands)
-            for a in day_articles:
-                if a["url"] not in seen_urls:
-                    # Tag with sector='__brand__' for internal filtering
-                    a["sector"] = "__brand__"
-                    seen_urls.add(a["url"])
-                    all_discovered.append(a)
+                
+                day_articles = await discover_articles(queries, current_day, geo, job_id, keywords=[brand])
+                for a in day_articles:
+                    if a["url"] not in seen_urls:
+                        # Tag with brand name for internal filtering
+                        a["sector"] = "__brand__"
+                        a["brand_name"] = brand 
+                        seen_urls.add(a["url"])
+                        all_discovered.append(a)
+                        
             current_day += timedelta(days=1)
 
         total_found = len(all_discovered)
