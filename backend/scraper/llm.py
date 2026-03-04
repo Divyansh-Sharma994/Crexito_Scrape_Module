@@ -11,6 +11,13 @@ GROQ_API_KEYS = [k.strip() for k in os.getenv("GROQ_API_KEY", "").split(",") if 
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "minimax-m2:cloud")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
+_ollama_semaphore = None
+def get_ollama_semaphore():
+    global _ollama_semaphore
+    if _ollama_semaphore is None:
+        _ollama_semaphore = asyncio.Semaphore(4) # Throttles to max 4 concurrent LLM requests to prevent 429
+    return _ollama_semaphore
+
 # --- Logging ---
 LOG_FILE = "scraper.log"
 
@@ -84,12 +91,25 @@ async def extract_metadata_with_ollama(body: str) -> Dict[str, Optional[str]]:
     """
 
     try:
-        # Use ollama-python library's async chat with increased timeout
         client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
-        response = await client.chat(model=OLLAMA_MODEL, messages=[
-            {'role': 'user', 'content': prompt},
-        ], format='json')
+        sem = get_ollama_semaphore()
         
+        response = None
+        for attempt in range(4):
+            try:
+                async with sem:
+                    response = await client.chat(model=OLLAMA_MODEL, messages=[
+                        {'role': 'user', 'content': prompt},
+                    ], format='json')
+                break
+            except Exception as e:
+                err_str = str(e).lower()
+                if ("429" in err_str or "too many concurrent" in err_str) and attempt < 3:
+                    log(f"Ollama rate limit hit (429). Retrying in {2 ** attempt}s...")
+                    await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
+                else:
+                    raise e
+                    
         content = response['message']['content']
         log(f"Raw Ollama Meta: {content[:100]}...")
         
@@ -100,7 +120,17 @@ async def extract_metadata_with_ollama(body: str) -> Dict[str, Optional[str]]:
             import re
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
-                data = json.loads(match.group(0))
+                try:
+                    data = json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    # Final fallback logic: regex parse
+                    data = {}
+                    auth_m = re.search(r'"author"\s*:\s*(?:null|"([^"]*)")', content, re.IGNORECASE)
+                    data["author"] = auth_m.group(1) if auth_m and auth_m.group(1) else None
+                    agency_m = re.search(r'"agency"\s*:\s*(?:null|"([^"]*)")', content, re.IGNORECASE)
+                    data["agency"] = agency_m.group(1) if agency_m and agency_m.group(1) else None
+                    junk_m = re.search(r'"is_junk"\s*:\s*(true|false)', content, re.IGNORECASE)
+                    data["is_junk"] = True if (junk_m and junk_m.group(1).lower() == 'true') else False
             else:
                 raise ValueError("No JSON found in response")
 
@@ -131,9 +161,23 @@ async def verify_agency_with_ollama(body: str, detected_agency: str) -> str:
     """
     try:
         client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
-        response = await client.chat(model=OLLAMA_MODEL, messages=[
-            {'role': 'user', 'content': prompt},
-        ])
+        sem = get_ollama_semaphore()
+        
+        response = None
+        for attempt in range(4):
+            try:
+                async with sem:
+                    response = await client.chat(model=OLLAMA_MODEL, messages=[
+                        {'role': 'user', 'content': prompt},
+                    ])
+                break
+            except Exception as e:
+                err_str = str(e).lower()
+                if ("429" in err_str or "too many concurrent" in err_str) and attempt < 3:
+                    await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
+                else:
+                    raise e
+                    
         return response['message']['content'].strip()
     except Exception as e:
         log(f"Ollama agency verify error: {e}")
@@ -165,10 +209,23 @@ async def check_relevancy_with_ollama(body: str, subject: str) -> Dict[str, Any]
     """
     try:
         client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
-        response = await client.chat(model=OLLAMA_MODEL, messages=[
-            {'role': 'user', 'content': prompt},
-        ], format='json')
+        sem = get_ollama_semaphore()
         
+        response = None
+        for attempt in range(4):
+            try:
+                async with sem:
+                    response = await client.chat(model=OLLAMA_MODEL, messages=[
+                        {'role': 'user', 'content': prompt},
+                    ], format='json')
+                break
+            except Exception as e:
+                err_str = str(e).lower()
+                if ("429" in err_str or "too many concurrent" in err_str) and attempt < 3:
+                    await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
+                else:
+                    raise e
+                    
         content = response['message']['content']
         log(f"Raw Ollama Relevancy: {content[:100]}...")
         
