@@ -57,26 +57,45 @@ export default function ArticlesBrowser() {
     search: "",
   });
 
+  const [deepSearch, setDeepSearch] = useState(false);
+
   useEffect(() => {
     api.get("/scrape/options").then(setOptions).catch(() => { });
   }, []);
 
   const loadArticles = useCallback(async (pg = 1) => {
     setLoading(true);
-    const params = new URLSearchParams({ page: pg, page_size: 25 });
-    Object.entries(filters).forEach(([k, v]) => { if (v) params.set(k, v); });
     try {
-      const res = await api.get(`/articles/?${params}`);
-      setArticles(res.articles);
-      setTotal(res.total);
-      setTotalPages(res.total_pages);
-      setPage(pg);
+      if (deepSearch && filters.search) {
+        // Use FTS5 optimization for keywords
+        const params = new URLSearchParams();
+        params.set("keywords", filters.search);
+        if (filters.sector) params.set("sector", filters.sector);
+        if (filters.region) params.set("region", filters.region);
+        if (filters.date_from) params.set("date_from", filters.date_from);
+        if (filters.date_to) params.set("date_to", filters.date_to);
+
+        const res = await api.get(`/articles/search?${params}`);
+        setArticles(res);
+        setTotal(res.length);
+        setTotalPages(1);
+        setPage(1);
+      } else {
+        // Standard ILIKE filtering with pagination
+        const params = new URLSearchParams({ page: pg, page_size: 25 });
+        Object.entries(filters).forEach(([k, v]) => { if (v) params.set(k, v); });
+        const res = await api.get(`/articles/?${params}`);
+        setArticles(res.articles);
+        setTotal(res.total);
+        setTotalPages(res.total_pages);
+        setPage(pg);
+      }
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
-  }, [filters]);
+  }, [filters, deepSearch]);
 
   useEffect(() => { loadArticles(1); }, []);
 
@@ -95,7 +114,7 @@ export default function ArticlesBrowser() {
 
       <div className="page-header">
         <div className="page-title">Articles Browser</div>
-        <div className="page-subtitle">// {total.toLocaleString()} ARTICLES IN DATABASE</div>
+        <div className="page-subtitle">// {total.toLocaleString()} {deepSearch ? "MATCHING RESULTS" : "ARTICLES IN DATABASE"}</div>
       </div>
 
       {/* Filters */}
@@ -123,18 +142,29 @@ export default function ArticlesBrowser() {
           <input type="date" className="form-control" value={filters.date_to} onChange={(e) => setFilter("date_to", e.target.value)} />
         </div>
         <div className="form-group" style={{ minWidth: 220 }}>
-          <label className="form-label">Search</label>
+          <label className="form-label">Search Keywords</label>
           <input
             type="text"
             className="form-control"
-            placeholder="Title or body..."
+            placeholder={deepSearch ? "llm, chatgpt, nvidia..." : "Title or body..."}
             value={filters.search}
             onChange={(e) => setFilter("search", e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && loadArticles(1)}
           />
         </div>
+        <div className="form-group" style={{ display: "flex", alignItems: "center", gap: 8, paddingBottom: 8 }}>
+          <input
+            type="checkbox"
+            id="deep-search-check"
+            checked={deepSearch}
+            onChange={(e) => setDeepSearch(e.target.checked)}
+          />
+          <label htmlFor="deep-search-check" className="form-label" style={{ marginBottom: 0, fontSize: 11, cursor: "pointer" }}>
+            Deep Search (FTS5)
+          </label>
+        </div>
         <button className="btn btn-primary" onClick={() => loadArticles(1)} style={{ alignSelf: "flex-end" }}>
-          Search
+          {deepSearch ? "Deep Search" : "Filter"}
         </button>
         <a
           className="btn btn-secondary"

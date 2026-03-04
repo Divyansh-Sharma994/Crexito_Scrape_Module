@@ -66,28 +66,56 @@ async def summarize_with_groq(text: str) -> Optional[str]:
     return None
 
 # --- Ollama Client ---
-async def extract_metadata_with_ollama(body: str) -> Dict[str, Optional[str]]:
+from urllib.parse import urlparse
+
+def get_domain_name(url: str) -> str:
+    """Extract a clean domain name from a URL."""
+    try:
+        domain = urlparse(url).netloc
+        if domain.startswith("www."):
+            domain = domain[4:]
+        # Remove TLD for a cleaner 'Agency' name if needed, or keep it.
+        # Let's keep it but capitalized for common ones.
+        parts = domain.split('.')
+        if len(parts) > 1:
+            return parts[-2].capitalize()
+        return domain.capitalize()
+    except:
+        return ""
+
+async def extract_metadata_with_ollama(body: str, url: str = "", context_agency: str = "") -> Dict[str, Optional[str]]:
     """
     Extract author, agency, and clean the body using local Ollama instance.
+    Uses URL and context_agency for better accuracy.
     """
     if not body or len(body) < 100:
         return {"author": None, "agency": None, "body": body}
 
+    domain = get_domain_name(url) if url else ""
+    context_str = f"Source Info: URL={url}, Domain={domain}, Suggested Agency={context_agency}"
+
     prompt = f"""
-    Analyze the following news article text and extract the 'Author' and the 'Publishing Agency/News Organization'.
-    Also, identify if the text is complete or just a "junk" snippet (like a paywall or cookie notice).
-    If the text is a valid article, provide a cleaned version of the body by removing ads, social media links, and irrelevant navigation text.
+    Analyze the following news article text and extract the 'Author' (person) and the 'Publishing Agency' (news organization).
     
-    CRITICAL: DO NOT SUMMARIZE the article. Keep the internal content exactly as is, just remove external junk.
+    GUIDELINES:
+    - For 'Author': Look for "By [Name]", "Author: [Name]", "By [Name] [Agency]", or prominent person names at the start or end of the article.
+    - For 'Agency': If not explicitly named, use the provided 'Domain' ({domain}) as a default. If multiple organizations are mentioned, identify the one that is the source of this specific article (usually mentioned at the top or in the byline).
+    - If the 'Suggested Agency' ({context_agency}) is broad (e.g. Google News), try to find the specific publisher.
+    - Provide a 'cleaned_body' by removing ads, social media links, and navigational text. DO NOT SUMMARIZE.
+    - Set 'is_junk' to true if the content is mostly junk snippet/paywall.
+
+    Source Info: {context_str}
 
     Text:
     \"\"\"{body[:6000]}\"\"\"
 
-    Return ONLY a JSON object with the following keys:
-    - "author": (string or null, e.g., "John Doe")
-    - "agency": (string or null, e.g., "The New York Times")
-    - "is_junk": (boolean, true if the text is mostly bot-detection, paywall, or cookie consent messages)
-    - "cleaned_body": (string, the preserved article content without ads/junk. DO NOT SUMMARIZE.)
+    Return ONLY a JSON object:
+    {{
+      "author": (string or null),
+      "agency": (string or null),
+      "is_junk": (boolean),
+      "cleaned_body": (string)
+    }}
     """
 
     try:
@@ -134,9 +162,21 @@ async def extract_metadata_with_ollama(body: str) -> Dict[str, Optional[str]]:
             else:
                 raise ValueError("No JSON found in response")
 
+        # --- Post-processing Smart Fallbacks ---
+        res_author = data.get("author")
+        res_agency = data.get("agency")
+        
+        # If agency is null or generic, use domain as strongest fallback
+        generic_list = ["google news", "bing news", "msn", "yahoo news", "google", "rss", "feed"]
+        if not res_agency or any(g in res_agency.lower() for g in generic_list):
+            if domain:
+                res_agency = domain
+            elif context_agency and not any(g in context_agency.lower() for g in generic_list):
+                res_agency = context_agency
+
         return {
-            "author": data.get("author"),
-            "agency": data.get("agency"),
+            "author": res_author,
+            "agency": res_agency,
             "is_junk": data.get("is_junk", False),
             "cleaned_body": data.get("cleaned_body", body)
         }

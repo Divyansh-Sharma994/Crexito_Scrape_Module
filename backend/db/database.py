@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS scrape_jobs (
     started_at  TEXT DEFAULT CURRENT_TIMESTAMP,
     completed_at TEXT,
     error       TEXT,
-    search_mode TEXT DEFAULT 'broad'
+    search_mode TEXT DEFAULT 'broad',
+    cumulative_found INTEGER DEFAULT 0,
+    phase_stats TEXT
 );
 
 -- FIX #1: Indexes for fast filtering
@@ -60,6 +62,18 @@ CREATE TABLE IF NOT EXISTS watched_brands (
 );
 -- FIX #1: Full-Text Search virtual table for fast body search
 CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(title, full_body, content=articles, content_rowid=id);
+
+-- Triggers to keep FTS index in sync with articles table
+CREATE TRIGGER IF NOT EXISTS articles_ai AFTER INSERT ON articles BEGIN
+  INSERT INTO articles_fts(rowid, title, full_body) VALUES (new.id, new.title, new.full_body);
+END;
+CREATE TRIGGER IF NOT EXISTS articles_ad AFTER DELETE ON articles BEGIN
+  INSERT INTO articles_fts(articles_fts, rowid, title, full_body) VALUES('delete', old.id, old.title, old.full_body);
+END;
+CREATE TRIGGER IF NOT EXISTS articles_au AFTER UPDATE ON articles BEGIN
+  INSERT INTO articles_fts(articles_fts, rowid, title, full_body) VALUES('delete', old.id, old.title, old.full_body);
+  INSERT INTO articles_fts(rowid, title, full_body) VALUES (new.id, new.title, new.full_body);
+END;
 """
 
 POSTGRES_SCHEMA = """
@@ -94,7 +108,9 @@ CREATE TABLE IF NOT EXISTS scrape_jobs (
     started_at  TIMESTAMPTZ DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
     error       TEXT,
-    search_mode TEXT DEFAULT 'broad'
+    search_mode TEXT DEFAULT 'broad',
+    cumulative_found INTEGER DEFAULT 0,
+    phase_stats TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_articles_sector       ON articles(sector);
 CREATE INDEX IF NOT EXISTS idx_articles_region       ON articles(region);
@@ -141,6 +157,8 @@ async def init_db():
                 ],
                 "scrape_jobs": [
                     ("search_mode", "TEXT"),
+                    ("cumulative_found", "INTEGER"),
+                    ("phase_stats", "TEXT"),
                 ],
             }
             for table, columns in EXPECTED_COLUMNS.items():
@@ -154,6 +172,16 @@ async def init_db():
                         except Exception as e:
                             if "duplicate column" not in str(e).lower():
                                 print(f"Migration warning: {e}")
+
+            # ─── FTS Backfill check (One-time sync for existing data) ──────────
+            async with db.execute("SELECT COUNT(*) FROM articles") as c:
+                art_count = (await c.fetchone())[0]
+            async with db.execute("SELECT COUNT(*) FROM articles_fts") as c:
+                fts_count = (await c.fetchone())[0]
+            
+            if art_count > 0 and fts_count == 0:
+                print("FTS Index is empty. Performing backfill/rebuild...")
+                await db.execute("INSERT INTO articles_fts(articles_fts) VALUES('rebuild')")
 
             await db.commit()
     else:

@@ -66,7 +66,10 @@ JUNK_PATTERNS = [
     "unusual traffic from your computer network", "our systems have detected unusual traffic",
     "the block will expire shortly", "webcache.googleusercontent.com",
     "requests coming from your computer network", "archive.ph/newest", "error 429",
-    "too many requests", "rate limit exceeded",
+    "too many requests", "rate limit exceeded", "detected unusual traffic",
+    "access denied", "robot check", "captcha", "security challenge",
+    "javascript is disabled", "please turn on javascript",
+    "cookies are disabled", "enable cookies to continue",
 ]
 
 def is_junk_body(body: Optional[str]) -> bool:
@@ -157,8 +160,12 @@ def extract_author_from_html(html: str) -> Optional[str]:
                     res = clean_author_text(tag["content"])
                     if res: return res
 
-        # 3. CSS Selectors
-        for sel in [".author", ".byline", ".entry-author", ".article-author", '[rel="author"]']:
+        # 3. CSS Selectors (Common patterns used globally)
+        for sel in [
+            ".author", ".byline", ".entry-author", ".article-author", '[rel="author"]',
+            '[class*="author-name"]', '[class*="byline-name"]', '.p-author', '.p-name',
+            '[itemprop="author"] .name', '.article__author-name', '.caas-author-byline'
+        ]:
             el = soup.select_one(sel)
             if el:
                 res = clean_author_text(el.get_text(strip=True))
@@ -194,15 +201,22 @@ def extract_body_from_html(html: str) -> str:
         if ext and len(ext) > 400: return ext
     except: pass
 
-    # 4. Fallback BeautifulSoup
+    # 4. Fallback BeautifulSoup (More aggressive)
     try:
         soup = BeautifulSoup(html, "lxml")
-        for t in soup(["script", "style", "nav", "footer", "header", "aside"]): t.decompose()
-        for sel in ["article", '[class*="article-body"]', '[class*="story-body"]', "main"]:
-            el = soup.select_one(sel)
-            if el:
-                txt = el.get_text(separator="\n", strip=True)
-                if len(txt) > 400: return txt
+        for t in soup(["script", "style", "nav", "footer", "header", "aside", "svg", "form"]): t.decompose()
+        # Find the div with the most paragraphs
+        best_div = None
+        max_p = 0
+        for div in soup.find_all(["div", "article", "section"]):
+            p_count = len(div.find_all("p"))
+            if p_count > max_p:
+                max_p = p_count
+                best_div = div
+        
+        if best_div:
+            txt = best_div.get_text(separator="\n", strip=True)
+            if len(txt) > 400: return txt
     except: pass
     return ""
 
@@ -330,7 +344,7 @@ async def run_enrichment(job_id: Optional[str] = None, batch_size: int = 1000):
                         agency = item.get("agency")
                         
                         # --- Ollama Magic ---
-                        ollama_meta = await extract_metadata_with_ollama(data["text"])
+                        ollama_meta = await extract_metadata_with_ollama(data["text"], url=real_url, context_agency=item.get("agency", ""))
                         
                         # Use Ollama if heuristic failed or to verify
                         if not author and ollama_meta.get("author"):

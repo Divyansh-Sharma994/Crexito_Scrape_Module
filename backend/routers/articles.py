@@ -292,6 +292,62 @@ async def export_json(
                              headers={"Content-Disposition": "attachment; filename=articles.ndjson"})
 
 
+@router.get("/search")
+async def search_articles(
+    keywords: str = Query(..., description="Comma-separated keywords (e.g. llm,ai,chatgpt)"),
+    sector: Optional[str] = None,
+    region: Optional[str] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    limit: int = 200
+):
+    """
+    Fast keyword search using SQLite FTS5. Matches across titles and full bodies.
+    Example: /api/articles/search?keywords=llm,chatgpt&sector=artificial intelligence
+    """
+    # Build FTS query from the comma‑separated `keywords` param
+    # Use OR to join multiple terms
+    kws = [f'"{kw.strip()}"' for kw in keywords.split(",") if kw.strip()]
+    if not kws:
+        return []
+    
+    fts_query = " OR ".join(kws)
+
+    conditions = []
+    params = []
+    i = 1
+
+    if sector:
+        conditions.append(f"a.sector = ${i}"); params.append(sector); i += 1
+    if region:
+        conditions.append(f"a.region = ${i}"); params.append(region); i += 1
+    if date_from:
+        conditions.append(f"date(a.published_at) >= date(${i})"); params.append(str(date_from)); i += 1
+    if date_to:
+        conditions.append(f"date(a.published_at) <= date(${i})"); params.append(str(date_to)); i += 1
+
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+    sql = f"""
+        SELECT a.id, a.title, a.url, a.author, a.agency, a.published_at,
+               a.sector, a.region, a.word_count, a.scraped_at, a.scrape_job_id,
+               a.summary,
+               CASE WHEN a.full_body IS NOT NULL THEN substr(a.full_body, 1, 200) ELSE NULL END as body_preview
+        FROM articles a
+        JOIN articles_fts ON articles_fts.rowid = a.id
+        WHERE {where_clause}
+          AND articles_fts MATCH ${i}
+        ORDER BY a.published_at DESC
+        LIMIT ${i+1}
+    """
+    params.extend([fts_query, limit])
+
+    async with get_db() as db:
+        rows = await db.fetch(sql, *params)
+    
+    return rows
+
+
 @router.get("/{article_id}")
 async def get_article(article_id: int):
     """Get full article content including body and summary."""

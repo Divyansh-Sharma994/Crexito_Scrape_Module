@@ -2,57 +2,108 @@ import { useState, useEffect } from "react";
 import { api } from "../api";
 
 function JobRow({ job, onDelete, onRefresh }) {
+  const [showPhases, setShowPhases] = useState(false);
   const pct = job.total_found > 0
     ? Math.round((job.total_scraped / job.total_found) * 100)
     : 0;
 
+  let phaseStats = {};
+  if (job.phase_stats) {
+    try {
+      phaseStats = typeof job.phase_stats === "string" ? JSON.parse(job.phase_stats) : job.phase_stats;
+    } catch (e) {
+      console.error("Parse error:", e);
+    }
+  }
+
   return (
-    <tr>
-      <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--muted)" }}>
-        {job.id.slice(0, 12)}...
-      </td>
-      <td><span className="badge badge-sector">{job.sector}</span></td>
-      <td><span className="badge badge-region">{job.region}</span></td>
-      <td style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>
-        {job.date_from} → {job.date_to}
-      </td>
-      <td>
-        <span className={`badge badge-${job.status}`}>{job.status}</span>
-      </td>
-      <td>
-        <div style={{ minWidth: 140 }}>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, marginBottom: 4 }}>
-            {(job.total_scraped || 0).toLocaleString()} / {(job.total_found || 0).toLocaleString()} articles
-          </div>
-          {(job.status === "running" || job.status === "pending") && (
-            <div className="progress-bar-track">
-              <div className="progress-bar-fill" style={{ width: `${pct}%` }} />
+    <>
+      <tr className={showPhases ? "row-active" : ""}>
+        <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--muted)" }}>
+          {job.id.slice(0, 12)}...
+        </td>
+        <td><span className="badge badge-sector">{job.sector}</span></td>
+        <td><span className="badge badge-region">{job.region}</span></td>
+        <td style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>
+          {job.date_from} → {job.date_to}
+        </td>
+        <td>
+          <span className={`badge badge-${job.status}`}>{job.status}</span>
+        </td>
+        <td>
+          <div style={{ minWidth: 160 }}>
+            <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 8 }}>
+              Discovery Pool: <b style={{ color: "var(--accent)" }}>{(job.cumulative_found || 0).toLocaleString()} URLs</b>
             </div>
-          )}
-        </div>
-      </td>
-      <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--muted)" }}>
-        {job.started_at ? new Date(job.started_at).toLocaleString() : "—"}
-      </td>
-      <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--muted)" }}>
-        {job.completed_at ? new Date(job.completed_at).toLocaleString() : "—"}
-      </td>
-      <td style={{ maxWidth: 200, fontSize: 11, color: "var(--danger)", wordBreak: "break-word" }}>
-        {job.error ? job.error.slice(0, 80) : "—"}
-      </td>
-      <td>
-        <div style={{ display: "flex", gap: 6 }}>
-          <button className="btn btn-secondary" style={{ padding: "4px 10px", fontSize: 11 }}
-            onClick={() => onRefresh(job.id)}>
-            ↻
-          </button>
-          <button className="btn btn-danger" style={{ padding: "4px 10px", fontSize: 11 }}
-            onClick={() => onDelete(job.id)}>
-            ✕
-          </button>
-        </div>
-      </td>
-    </tr>
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, marginBottom: 4 }}>
+              {(job.total_scraped || 0).toLocaleString()} / {(job.total_found || 0).toLocaleString()} articles
+            </div>
+            {(job.status === "running" || job.status === "pending") && (
+              <div className="progress-bar-track">
+                <div className="progress-bar-fill" style={{ width: `${pct}%` }} />
+              </div>
+            )}
+            <button
+              className="btn btn-secondary"
+              onClick={() => setShowPhases(!showPhases)}
+              style={{
+                padding: "2px 8px", fontSize: 9, marginTop: 12, height: "auto",
+                textTransform: "none", fontWeight: 400, opacity: 0.9,
+                background: "rgba(0, 229, 255, 0.05)", border: "1px solid rgba(0, 229, 255, 0.1)"
+              }}
+            >
+              {showPhases ? "▲ Hide Tracker" : "▼ Track Phases"}
+            </button>
+          </div>
+        </td>
+        <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--muted)" }}>
+          {job.started_at ? new Date(job.started_at).toLocaleString() : "—"}
+        </td>
+        <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--muted)" }}>
+          {job.completed_at ? new Date(job.completed_at).toLocaleString() : "—"}
+        </td>
+        <td style={{ maxWidth: 200, fontSize: 11, color: "var(--danger)", wordBreak: "break-word" }}>
+          {job.error ? job.error.slice(0, 80) : "—"}
+        </td>
+        <td>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="btn btn-secondary" style={{ padding: "4px 10px", fontSize: 11 }}
+              onClick={() => onRefresh(job.id)}>
+              ↻
+            </button>
+            <button className="btn btn-danger" style={{ padding: "4px 10px", fontSize: 11 }}
+              onClick={() => onDelete(job.id)}>
+              ✕
+            </button>
+          </div>
+        </td>
+      </tr>
+      {showPhases && (
+        <tr style={{ background: "rgba(0,0,0,0.3)" }}>
+          <td colSpan={10} style={{ padding: "16px 24px", borderBottom: "1px solid var(--border)" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 24 }}>
+              {Object.entries(phaseStats).length > 0 ? (
+                Object.entries(phaseStats).map(([name, data]) => (
+                  <div key={name} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>{name}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span className={`badge badge-${data.status}`} style={{ fontSize: 9 }}>{data.status}</span>
+                      <span style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
+                        {new Date(data.updated_at).toLocaleTimeString()}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div style={{ fontSize: 11, color: "var(--muted)", fontStyle: "italic" }}>
+                  Waiting for backend to report phase progress...
+                </div>
+              )}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 
@@ -133,7 +184,7 @@ export default function Jobs() {
               <th>Region</th>
               <th>Date Range</th>
               <th>Status</th>
-              <th>Progress</th>
+              <th>Progress & Tasks</th>
               <th>Started</th>
               <th>Completed</th>
               <th>Error</th>

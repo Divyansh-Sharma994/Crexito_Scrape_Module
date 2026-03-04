@@ -16,6 +16,7 @@ import re
 import os
 import sys
 import random
+import json
 from datetime import datetime, date, timedelta
 from typing import Optional, List
 import httpx
@@ -37,6 +38,28 @@ def log(msg: str):
         f.write(f"{timestamp} - {msg}\n")
         f.flush()
     print(f"SCRAPER: {msg}", file=sys.stderr)
+
+# ─── Progress Helpers ──────────────────────────────────────────────────────────
+async def update_phase_status(db, job_id, phase_name, status):
+    """Update job phase stats (stored as JSON) in the DB."""
+    try:
+        job = await db.fetchrow("SELECT phase_stats FROM scrape_jobs WHERE id = $1", job_id)
+        current_stats = {}
+        if job and job.get("phase_stats"):
+            try:
+                current_stats = json.loads(job["phase_stats"])
+            except:
+                pass
+        current_stats[phase_name] = {
+            "status": status,
+            "updated_at": datetime.now().isoformat()
+        }
+        await db.execute(
+            "UPDATE scrape_jobs SET phase_stats = $1 WHERE id = $2",
+            json.dumps(current_stats), job_id
+        )
+    except Exception as e:
+        log(f"Error updating phase status: {e}")
 
 executor = ThreadPoolExecutor(max_workers=30)
 
@@ -236,7 +259,7 @@ async def fetch_sitemaps(client: httpx.AsyncClient, day: date, keywords: List[st
 # ─── Multi-Engine Discovery ────────────────────────────────────────────────────
 
 async def discover_articles(
-    queries: List[str], day: date, geo: str, job_id: Optional[str] = None, keywords: List[str] = None
+    queries: List[str], day: date, geo: str, job_id: Optional[str] = None, keywords: List[str] = None, cumulative_total: Optional[set] = None
 ) -> List[dict]:
     """Aggregates results from Google News RSS, Bing News RSS, and News Sitemaps."""
     seen_urls: set = set()
@@ -318,7 +341,16 @@ async def discover_articles(
                         await db.execute("UPDATE scrape_jobs SET total_found=$1 WHERE id=$2", len(seen_urls), job_id)
                 except Exception as e:
                     log(f"Progress update error: {e}")
-            log(f"Discovery progress: {len(seen_urls)} unique URLs found so far...")
+            if cumulative_total is not None:
+                cumulative_total.update(seen_urls)
+                log(f"Cumulative unique URLs discovered: {len(cumulative_total)}")
+                if job_id:
+                    try:
+                        async with get_db() as db:
+                            await db.execute("UPDATE scrape_jobs SET cumulative_found=$1 WHERE id=$2", len(cumulative_total), job_id)
+                    except:
+                        pass
+            log(f"Phase Discovery progress: {len(seen_urls)} unique URLs found so far...")
 
     # Phase 2: Sitemap Discovery (High Quality)
     if keywords:
@@ -332,6 +364,15 @@ async def discover_articles(
                         seen_urls.add(a["url"])
                         seen_title_hashes.add(th)
                         articles.append(a)
+            if cumulative_total is not None:
+                cumulative_total.update(seen_urls)
+                log(f"Cumulative unique URLs discovered: {len(cumulative_total)}")
+                if job_id:
+                    try:
+                        async with get_db() as db:
+                            await db.execute("UPDATE scrape_jobs SET cumulative_found=$1 WHERE id=$2", len(cumulative_total), job_id)
+                    except:
+                        pass
         log(f"Sitemap phase done: {len(sitemap_articles)} found via sitemaps.")
 
     return articles
@@ -402,7 +443,7 @@ async def scrape_and_analyze(
         agency = article["agency"]
         
         if body and len(body) > 300:
-            ollama_meta = await extract_metadata_with_ollama(body)
+            ollama_meta = await extract_metadata_with_ollama(body, url=article["url"], context_agency=article["agency"])
             
             # --- Smart Relevancy Filter ---
             if search_mode == "smart":
@@ -480,6 +521,7 @@ async def _preflight_check() -> bool:
 async def run_scrape_job(
     job_id: str, sector: str, region: str, date_from: date, date_to: date, search_mode: str = "broad"
 ) -> dict:
+    cumulative_seen = set()
     log(f"🚀 Job {job_id} | {sector}/{region} | {date_from} → {date_to} | Mode: {search_mode}")
 
     # ── Gate 1: Pre-flight browser health check ────────────────────────────────
@@ -489,9 +531,11 @@ async def run_scrape_job(
             "UPDATE scrape_jobs SET status='running', started_at=CURRENT_TIMESTAMP WHERE id=$1",
             job_id
         )
+        await update_phase_status(db, job_id, "Preflight", "running")
 
     if not await _preflight_check():
         async with get_db() as db:
+            await update_phase_status(db, job_id, "Preflight", "failed")
             await db.execute(
                 "UPDATE scrape_jobs SET status='failed', error='Playwright browser launch failed (pre-flight)', completed_at=CURRENT_TIMESTAMP WHERE id=$1",
                 job_id
@@ -499,8 +543,13 @@ async def run_scrape_job(
         log(f"❌ Job {job_id} aborted: Playwright failed pre-flight.")
         return {"job_id": job_id, "error": "browser_launch_failed"}
 
+    async with get_db() as db:
+        await update_phase_status(db, job_id, "Preflight", "completed")
+
     try:
         # ── Gate 2: Discovery phase ────────────────────────────────────────────
+        async with get_db() as db:
+            await update_phase_status(db, job_id, "Discovery", "running")
         keywords = SECTOR_KEYWORDS.get(sector.lower(), [sector])
         geo      = REGION_MAP.get(region.lower(), {"geo": "US"})["geo"]
         cities   = REGION_MAP.get(region.lower(), {}).get("cities", [])
@@ -520,7 +569,7 @@ async def run_scrape_job(
                         queries.append(f'"{kw}" {city}')
 
                 # pass 1
-                day_articles = await discover_articles(queries, current_day, geo, job_id, keywords=keywords)
+                day_articles = await discover_articles(queries, current_day, geo, job_id, keywords=keywords, cumulative_total=cumulative_seen)
                 for a in day_articles:
                     if a["url"] not in seen_urls:
                         seen_urls.add(a["url"])
@@ -546,7 +595,7 @@ async def run_scrape_job(
                         recursive_queries.append(f'"{t}" {region}')
                         recursive_queries.append(f'"{t}" news')
 
-                    recursive_articles = await discover_articles(recursive_queries, current_day, geo, job_id, keywords=None)
+                    recursive_articles = await discover_articles(recursive_queries, current_day, geo, job_id, keywords=None, cumulative_total=cumulative_seen)
                     log(f"Recursive discovery found {len(recursive_articles)} new articles.")
                     for a in recursive_articles:
                         if a["url"] not in seen_urls:
@@ -560,9 +609,10 @@ async def run_scrape_job(
             log(f"Discovery phase error (will scrape partial results): {type(e).__name__}: {e}")
 
         total_found = len(all_discovered)
-        log(f"Discovery complete: {total_found} unique URLs found.")
+        log(f"Discovery complete (Job Total): {len(cumulative_seen)} unique URLs found.")
         async with get_db() as db:
-            await db.execute("UPDATE scrape_jobs SET total_found=$1 WHERE id=$2", total_found, job_id)
+            await update_phase_status(db, job_id, "Discovery", "completed")
+            await db.execute("UPDATE scrape_jobs SET total_found=$1, cumulative_found=$2 WHERE id=$3", total_found, len(cumulative_seen), job_id)
 
         if total_found == 0:
             async with get_db() as db:
@@ -574,6 +624,8 @@ async def run_scrape_job(
             return {"job_id": job_id, "total_found": 0, "total_scraped": 0}
 
         # ── Gate 3: Scraping phase ─────────────────────────────────────────────
+        async with get_db() as db:
+            await update_phase_status(db, job_id, "Extraction", "running")
         scraped_counter = [0]
         _last_reported = [0]   # track last write to avoid spamming DB
 
@@ -628,6 +680,7 @@ async def run_scrape_job(
             # Scraping failed after discovery — save partial result, don't lose discovered count
             log(f"Scraping phase failed (partial save): {scrape_err}")
             async with get_db() as db:
+                await update_phase_status(db, job_id, "Extraction", "failed")
                 await db.execute(
                     "UPDATE scrape_jobs SET status='partial', error=$1, completed_at=CURRENT_TIMESTAMP, total_scraped=$2 WHERE id=$3",
                     f"Scraping phase error: {type(scrape_err).__name__}: {scrape_err}",
@@ -638,6 +691,7 @@ async def run_scrape_job(
 
         # ── Success ────────────────────────────────────────────────────────────
         async with get_db() as db:
+            await update_phase_status(db, job_id, "Extraction", "completed")
             await db.execute(
                 "UPDATE scrape_jobs SET status='completed', completed_at=CURRENT_TIMESTAMP, total_scraped=$1 WHERE id=$2",
                 scraped_counter[0], job_id
@@ -666,6 +720,7 @@ async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_fro
     Specialized scraper for Brand Tracking. 
     Performs focused searches for specific company/brand names across regions.
     """
+    cumulative_seen = set()
     log(f"🏢 Brand Tracker Job {job_id} | {len(brands)} brands | {region} | {date_from} → {date_to} | Mode: {search_mode}")
     
     # ── Gate 1: Check-in ────────────────────────────────────────────────────────
@@ -674,16 +729,23 @@ async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_fro
             "UPDATE scrape_jobs SET status='running', started_at=CURRENT_TIMESTAMP WHERE id=$1",
             job_id
         )
+        await update_phase_status(db, job_id, "Preflight", "running")
 
     if not await _preflight_check():
         async with get_db() as db:
+            await update_phase_status(db, job_id, "Preflight", "failed")
             await db.execute(
                 "UPDATE scrape_jobs SET status='failed', error='Browser launch failed during pre-flight', completed_at=CURRENT_TIMESTAMP WHERE id=$1",
                 job_id
             )
         return
 
+    async with get_db() as db:
+        await update_phase_status(db, job_id, "Preflight", "completed")
+
     try:
+        async with get_db() as db:
+            await update_phase_status(db, job_id, "BrandDiscovery", "running")
         geo = REGION_MAP.get(region.lower(), {"geo": "US"})["geo"]
         all_discovered = []
         seen_urls = set()
@@ -713,7 +775,7 @@ async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_fro
                     else:
                         queries.append(f'"{brand}"')
                 
-                day_articles = await discover_articles(queries, current_day, geo, job_id, keywords=[brand])
+                day_articles = await discover_articles(queries, current_day, geo, job_id, keywords=[brand], cumulative_total=cumulative_seen)
                 for a in day_articles:
                     if a["url"] not in seen_urls:
                         # Tag with brand name for internal filtering
@@ -727,7 +789,8 @@ async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_fro
         total_found = len(all_discovered)
         log(f"Brand Discovery complete: {total_found} unique URLs found.")
         async with get_db() as db:
-            await db.execute("UPDATE scrape_jobs SET total_found=$1 WHERE id=$2", total_found, job_id)
+            await update_phase_status(db, job_id, "BrandDiscovery", "completed")
+            await db.execute("UPDATE scrape_jobs SET total_found=$1, cumulative_found=$2 WHERE id=$3", total_found, len(cumulative_seen), job_id)
 
         if total_found == 0:
             async with get_db() as db:
@@ -735,6 +798,8 @@ async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_fro
             return
 
         # ── Gate 3: Scraping ────────────────────────────────────────────────────
+        async with get_db() as db:
+            await update_phase_status(db, job_id, "Extraction", "running")
         scraped_count = [0]
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -763,6 +828,7 @@ async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_fro
 
         # ── Finalize ──────────────────────────────────────────────────────────
         async with get_db() as db:
+            await update_phase_status(db, job_id, "Extraction", "completed")
             await db.execute(
                 "UPDATE scrape_jobs SET status='completed', completed_at=CURRENT_TIMESTAMP, total_scraped=$1 WHERE id=$2",
                 scraped_count[0], job_id
@@ -776,4 +842,5 @@ async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_fro
     except Exception as e:
         log(f"❌ Brand Tracker job {job_id} failed: {e}")
         async with get_db() as db:
+            await update_phase_status(db, job_id, "Extraction", "failed")
             await db.execute("UPDATE scrape_jobs SET status='failed', error=$1 WHERE id=$2", str(e), job_id)
