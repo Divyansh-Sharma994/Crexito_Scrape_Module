@@ -28,7 +28,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r backend/requirements.txt
-          python -m playwright install chromium
+          python -m playwright install --with-deps chromium
+      - name: Install and start Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
       - name: Run Discovery
         id: discover
         env:
@@ -55,7 +60,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r backend/requirements.txt
-          python -m playwright install chromium
+          python -m playwright install --with-deps chromium
+      - name: Install and start Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
       - name: Run Scrape Worker
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

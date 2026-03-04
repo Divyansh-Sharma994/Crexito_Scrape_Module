@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS scrape_jobs (
     total_scraped INTEGER DEFAULT 0,
     started_at  TEXT DEFAULT CURRENT_TIMESTAMP,
     completed_at TEXT,
-    error       TEXT
+    error       TEXT,
+    search_mode TEXT DEFAULT 'broad'
 );
 
 -- FIX #1: Indexes for fast filtering
@@ -92,7 +93,8 @@ CREATE TABLE IF NOT EXISTS scrape_jobs (
     total_scraped INTEGER DEFAULT 0,
     started_at  TIMESTAMPTZ DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
-    error       TEXT
+    error       TEXT,
+    search_mode TEXT DEFAULT 'broad'
 );
 CREATE INDEX IF NOT EXISTS idx_articles_sector       ON articles(sector);
 CREATE INDEX IF NOT EXISTS idx_articles_region       ON articles(region);
@@ -136,6 +138,9 @@ async def init_db():
                     ("sentiment", "TEXT"),
                     ("tags", "TEXT"),
                     ("summary", "TEXT"),
+                ],
+                "scrape_jobs": [
+                    ("search_mode", "TEXT"),
                 ],
             }
             for table, columns in EXPECTED_COLUMNS.items():

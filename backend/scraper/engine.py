@@ -25,10 +25,9 @@ import feedparser
 import trafilatura
 from urllib.parse import quote_plus
 from db.database import get_db
+from scraper.llm import summarize_with_groq, extract_metadata_with_ollama, check_relevancy_with_ollama
 from concurrent.futures import ThreadPoolExecutor
 from playwright_stealth import Stealth
-
-GROQ_API_KEYS = [k.strip() for k in os.getenv("GROQ_API_KEY", "").split(",") if k.strip()]
 
 LOG_FILE = "scraper.log"
 
@@ -334,43 +333,13 @@ async def discover_articles(
 
 # ─── Groq Summarization (Rate-limit safe) ─────────────────────────────────────
 
-async def summarize_with_groq(text: str, client: httpx.AsyncClient) -> Optional[str]:
-    """Groq LPU summarization with retry on rate-limit (Fix #8)."""
-    if not GROQ_API_KEYS or not text or len(text) < 400:
-        return None
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [
-            {"role": "system", "content": "Summarize this news article in 3 bullet points. Max 60 words total."},
-            {"role": "user", "content": text[:4000]},
-        ],
-        "max_tokens": 150,
-    }
-    for attempt in range(3):  # FIX #8: Retry up to 3 times
-        api_key = random.choice(GROQ_API_KEYS)
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        try:
-            resp = await client.post(url, headers=headers, json=payload, timeout=15)
-            if resp.status_code == 200:
-                return resp.json()["choices"][0]["message"]["content"]
-            elif resp.status_code == 429:  # Rate limited
-                wait = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                log(f"Groq rate limited. Waiting {wait}s before retry #{attempt + 1}")
-                await asyncio.sleep(wait)
-            else:
-                log(f"Groq API error: {resp.status_code} {resp.text[:100]}")
-                break
-        except Exception as e:
-            log(f"Groq request error (attempt {attempt + 1}): {e}")
-            await asyncio.sleep(1)
-    return None
+# Removed redundant summarize_with_groq (now in llm.py)
 
 # ─── Article Scraper (FAST — direct only, paywall bypass deferred to enrichment) ─
 
 async def scrape_and_analyze(
     article: dict, browser, db, job_id: str, sector: str, region: str,
-    groq_client: httpx.AsyncClient, scraped_counter: list
+    groq_client: httpx.AsyncClient, scraped_counter: list, search_mode: str = "broad"
 ):
     """Fast scrape: direct browser visit only. Paywall bypass runs later via enrichment."""
     from scraper.enrichment import extract_body_from_html, is_junk_body, extract_author_from_html
@@ -425,11 +394,39 @@ async def scrape_and_analyze(
             body = ""
 
         summary = None
+        agency = article["agency"]
+        
+        if body and len(body) > 300:
+            ollama_meta = await extract_metadata_with_ollama(body)
+            
+            # --- Smart Relevancy Filter ---
+            if search_mode == "smart":
+                # Use sector or brand name as the subject
+                subject = sector if sector != "__brand__" else article.get("brand_name", sector)
+                rel = await check_relevancy_with_ollama(body, subject)
+                if not rel.get("relevant"):
+                    log(f"REJECTED: Article not relevant to {subject} ({rel.get('reason')})")
+                    return
+
+            if not author and ollama_meta.get("author"):
+                author = ollama_meta["author"]
+            if ollama_meta.get("agency"):
+                agency = ollama_meta["agency"]
+            
+            # Double-check if agency looks like a redirector/generic
+            generic_agencies = ["google news", "bing news", "msn", "yahoo news", "google"]
+            if agency and any(gen in agency.lower() for gen in generic_agencies):
+                from scraper.llm import verify_agency_with_ollama
+                agency = await verify_agency_with_ollama(body, agency)
+
+            # Use cleaned body
+            body = ollama_meta.get("cleaned_body", body)
+
         word_count = len(body.split()) if body else 0
 
-        # Only call Groq if we got substantial content (saves API quota)
+        # Only call Groq if we got substantial content
         if word_count >= 150:
-            summary = await summarize_with_groq(body, groq_client)
+            summary = await summarize_with_groq(body)
 
         await db.execute("""
             INSERT INTO articles (title, url, full_body, summary, agency, author, published_at, sector, region, scrape_job_id, word_count, title_hash)
@@ -439,9 +436,10 @@ async def scrape_and_analyze(
                 summary    = CASE WHEN articles.summary IS NULL THEN excluded.summary ELSE articles.summary END,
                 word_count = CASE WHEN articles.word_count IS NULL OR articles.word_count = 0 THEN excluded.word_count ELSE articles.word_count END,
                 author     = CASE WHEN articles.author IS NULL OR articles.author = '' THEN excluded.author ELSE articles.author END,
+                agency     = excluded.agency,
                 title_hash = excluded.title_hash
         """, article["title"], article["url"], body, summary,
-             article["agency"], author, article["published_at"],
+             agency, author, article["published_at"],
              sector, region, job_id, word_count, article.get("title_hash", ""))
 
         scraped_counter[0] += 1
@@ -459,21 +457,24 @@ async def _preflight_check() -> bool:
     """Verify Playwright can launch a browser before accepting a new job."""
     try:
         async with async_playwright() as p:
+            # Minimal args for maximum compatibility on Windows/Desktop
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
+                args=["--disable-dev-shm-usage"] if os.name != "nt" else [] 
             )
             await browser.close()
         return True
     except Exception as e:
-        log(f"PRE-FLIGHT FAILED: Playwright cannot launch browser: {e}")
+        import traceback
+        err_stack = traceback.format_exc()
+        log(f"PRE-FLIGHT FAILED: {type(e).__name__}: {e}\n{err_stack}")
         return False
 
 
 async def run_scrape_job(
-    job_id: str, sector: str, region: str, date_from: date, date_to: date
+    job_id: str, sector: str, region: str, date_from: date, date_to: date, search_mode: str = "broad"
 ) -> dict:
-    log(f"🚀 Job {job_id} | {sector}/{region} | {date_from} → {date_to}")
+    log(f"🚀 Job {job_id} | {sector}/{region} | {date_from} → {date_to} | Mode: {search_mode}")
 
     # ── Gate 1: Pre-flight browser health check ────────────────────────────────
     # Mark running immediately so the UI reflects activity
@@ -587,7 +588,7 @@ async def run_scrape_job(
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
                     headless=True,
-                    args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-extensions"]
+                    args=["--disable-dev-shm-usage"] if os.name != "nt" else [] 
                 )
 
                 async with httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=100)) as groq_client:
@@ -598,7 +599,7 @@ async def run_scrape_job(
                             async with semaphore:
                                 await scrape_and_analyze(
                                     article, browser, db, job_id,
-                                    sector, region, groq_client, scraped_counter
+                                    sector, region, groq_client, scraped_counter, search_mode
                                 )
                                 await _update_progress()
 
@@ -654,12 +655,12 @@ async def run_scrape_job(
         raise
 
 
-async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_from: date, date_to: date):
+async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_from: date, date_to: date, search_mode: str = "broad"):
     """
     Specialized scraper for Brand Tracking. 
     Performs focused searches for specific company/brand names across regions.
     """
-    log(f"🏢 Brand Tracker Job {job_id} | {len(brands)} brands | {region} | {date_from} → {date_to}")
+    log(f"🏢 Brand Tracker Job {job_id} | {len(brands)} brands | {region} | {date_from} → {date_to} | Mode: {search_mode}")
     
     # ── Gate 1: Check-in ────────────────────────────────────────────────────────
     async with get_db() as db:
@@ -727,7 +728,10 @@ async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_fro
         # ── Gate 3: Scraping ────────────────────────────────────────────────────
         scraped_count = [0]
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--disable-dev-shm-usage"] if os.name != "nt" else [] 
+            )
             async with httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=50)) as groq_client:
                 async with get_db() as db:
                     semaphore = asyncio.Semaphore(15)
@@ -736,7 +740,7 @@ async def run_brand_scrape(job_id: str, brands: List[str], region: str, date_fro
                         async with semaphore:
                             await scrape_and_analyze(
                                 article, browser, db, job_id,
-                                "brand_tracker", region, groq_client, scraped_count
+                                "brand_tracker", region, groq_client, scraped_count, search_mode
                             )
                             # Update progress every 10 articles
                             if scraped_count[0] % 10 == 0:

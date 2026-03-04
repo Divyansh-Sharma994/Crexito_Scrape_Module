@@ -18,6 +18,7 @@ class ScrapeRequest(BaseModel):
     region: str
     date_from: date
     date_to: date
+    search_mode: str = "broad"  # 'broad' or 'smart'
 
 
 @router.post("/start")
@@ -55,9 +56,9 @@ async def start_scrape(req: ScrapeRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
     async with get_db() as db:
         await db.execute("""
-            INSERT INTO scrape_jobs (id, sector, region, date_from, date_to, status)
-            VALUES ($1, $2, $3, $4, $5, 'pending')
-        """, job_id, req.sector.lower(), req.region.lower(), req.date_from, req.date_to)
+            INSERT INTO scrape_jobs (id, sector, region, date_from, date_to, status, search_mode)
+            VALUES ($1, $2, $3, $4, $5, 'pending', $6)
+        """, job_id, req.sector.lower(), req.region.lower(), req.date_from, req.date_to, req.search_mode)
 
     background_tasks.add_task(
         run_scrape_job,
@@ -66,6 +67,7 @@ async def start_scrape(req: ScrapeRequest, background_tasks: BackgroundTasks):
         region=req.region.lower(),
         date_from=req.date_from,
         date_to=req.date_to,
+        search_mode=req.search_mode,
     )
 
     return {
@@ -144,6 +146,7 @@ async def start_enrichment(background_tasks: BackgroundTasks, batch_size: int = 
 class AutomatedScrapeRequest(BaseModel):
     sector: str
     region: str
+    search_mode: str = "broad"
 
 @router.post("/automated_daily")
 async def start_automated_daily(req: AutomatedScrapeRequest, background_tasks: BackgroundTasks):
@@ -169,12 +172,12 @@ async def start_automated_daily(req: AutomatedScrapeRequest, background_tasks: B
     job_id = str(uuid.uuid4())
     async with get_db() as db:
         await db.execute("""
-            INSERT INTO scrape_jobs (id, sector, region, date_from, date_to, status)
-            VALUES ($1, $2, $3, $4, $5, 'pending')
-        """, job_id, req.sector.lower(), req.region.lower(), yesterday, yesterday)
+            INSERT INTO scrape_jobs (id, sector, region, date_from, date_to, status, search_mode)
+            VALUES ($1, $2, $3, $4, $5, 'pending', $6)
+        """, job_id, req.sector.lower(), req.region.lower(), yesterday, yesterday, req.search_mode)
 
     from scraper.engine import log
-    log(f"🤖 Automated trigger: Initiating {req.sector}/{req.region} for date {yesterday}")
+    log(f"🤖 Automated trigger: Initiating {req.sector}/{req.region} for date {yesterday} | Mode: {req.search_mode}")
     
     background_tasks.add_task(
         run_scrape_job,
@@ -183,6 +186,7 @@ async def start_automated_daily(req: AutomatedScrapeRequest, background_tasks: B
         region=req.region.lower(),
         date_from=yesterday,
         date_to=yesterday,
+        search_mode=req.search_mode,
     )
 
     return {

@@ -8,6 +8,7 @@ export default function NewScrape({ onNavigate }) {
     region: "",
     date_from: "",
     date_to: new Date().toISOString().slice(0, 10),
+    search_mode: "broad",
   });
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
@@ -118,6 +119,33 @@ export default function NewScrape({ onNavigate }) {
               onChange={(e) => set("date_to", e.target.value)}
             />
           </div>
+        </div>
+
+        <div className="form-group" style={{ marginTop: 20 }}>
+          <label className="form-label">Search Mode</label>
+          <div style={{ display: "flex", gap: 12 }}>
+            <button
+              className={`btn ${form.search_mode === "broad" ? "btn-primary" : "btn-secondary"}`}
+              style={{ flex: 1, padding: "12px" }}
+              onClick={() => set("search_mode", "broad")}
+            >
+              <div style={{ fontWeight: 700 }}>Broad Mode</div>
+              <div style={{ fontSize: 11, opacity: 0.8 }}>Save everything found</div>
+            </button>
+            <button
+              className={`btn ${form.search_mode === "smart" ? "btn-primary" : "btn-secondary"}`}
+              style={{ flex: 1, padding: "12px", border: form.search_mode === "smart" ? "1px solid var(--accent)" : "1px solid transparent" }}
+              onClick={() => set("search_mode", "smart")}
+            >
+              <div style={{ fontWeight: 700 }}>✨ Smart Mode</div>
+              <div style={{ fontSize: 11, opacity: 0.8 }}>AI filter for relevance</div>
+            </button>
+          </div>
+          {form.search_mode === "smart" && (
+            <div style={{ fontSize: 12, color: "var(--accent)", marginTop: 8, fontStyle: "italic" }}>
+              Uses local LLM to filter out passing mentions and ensuring your target is the primary subject.
+            </div>
+          )}
         </div>
 
         {dateWarning && (

@@ -21,6 +21,7 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 from db.database import get_db
+from scraper.llm import summarize_with_groq, extract_metadata_with_ollama, verify_agency_with_ollama
 
 GROQ_API_KEYS = [k.strip() for k in os.getenv("GROQ_API_KEY", "").split(",") if k.strip()]
 
@@ -262,29 +263,13 @@ async def fetch_with_paywall_bypass(browser, url: str) -> Dict[str, str]:
         return bypass_res
     return res
 
-async def summarize_with_groq(text: str, client: httpx.AsyncClient) -> Optional[str]:
-    if not GROQ_API_KEYS or not text or len(text) < 400: return None
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [{"role": "system", "content": "Summarize this news article in 3 bullet points. Max 60 words total."},
-                     {"role": "user", "content": text[:5000]}],
-        "max_tokens": 150,
-    }
-    for attempt in range(2):
-        key = random.choice(GROQ_API_KEYS)
-        try:
-            r = await client.post("https://api.groq.com/openai/v1/chat/completions",
-                                  headers={"Authorization": f"Bearer {key}"}, json=payload, timeout=20)
-            if r.status_code == 200: return r.json()["choices"][0]["message"]["content"]
-            await asyncio.sleep(2)
-        except: continue
-    return None
+# Removed redundant summarize_with_groq (now in llm.py)
 
 async def run_enrichment(job_id: Optional[str] = None, batch_size: int = 1000):
     log(f"Starting enrichment. Batch size: {batch_size}")
     async with get_db() as db:
         articles = await db.fetch("""
-            SELECT id, url FROM articles
+            SELECT id, url, title, agency FROM articles
             WHERE full_body IS NULL OR length(full_body) < 150 OR lower(full_body) LIKE '%javascript%'
             ORDER BY id DESC LIMIT $1
         """, batch_size)
@@ -310,7 +295,10 @@ async def run_enrichment(job_id: Optional[str] = None, batch_size: int = 1000):
                     log("Restarting browser due to crash or disconnect...")
                     try: await browser.close()
                     except: pass
-                    browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"])
+                    browser = await p.chromium.launch(
+                headless=True,
+                args=["--disable-dev-shm-usage"] if os.name != "nt" else [] 
+            )
                     browser_restart_needed = False
             return browser
 
@@ -339,14 +327,35 @@ async def run_enrichment(job_id: Optional[str] = None, batch_size: int = 1000):
 
                         # 3. Analyze
                         author = extract_author_from_html(data["html"])
-                        summary = await summarize_with_groq(data["text"], http_client)
-                        words = len(data["text"].split())
+                        agency = item.get("agency")
+                        
+                        # --- Ollama Magic ---
+                        ollama_meta = await extract_metadata_with_ollama(data["text"])
+                        
+                        # Use Ollama if heuristic failed or to verify
+                        if not author and ollama_meta.get("author"):
+                            author = ollama_meta["author"]
+                        
+                        if ollama_meta.get("agency"):
+                            agency = ollama_meta["agency"]
+                        
+                        # Use cleaned body if provided
+                        final_body = ollama_meta.get("cleaned_body", data["text"])
+                        
+                        # Double-check if agency looks like a redirector/generic
+                        generic_agencies = ["google news", "bing news", "msn", "yahoo news", "google"]
+                        if agency and any(gen in agency.lower() for gen in generic_agencies):
+                            log(f"Agency '{agency}' looks generic. Verifying...")
+                            agency = await verify_agency_with_ollama(final_body, agency)
+                        
+                        summary = await summarize_with_groq(final_body)
+                        words = len(final_body.split())
                         
                         async with get_db() as db:
                             await db.execute("""
-                                UPDATE articles SET full_body=$1, summary=$2, author=$3, word_count=$4, url=$5
-                                WHERE id=$6
-                            """, data["text"], summary, author, words, real_url, art_id)
+                                UPDATE articles SET full_body=$1, summary=$2, author=$3, word_count=$4, url=$5, agency=$6
+                                WHERE id=$7
+                            """, final_body, summary, author, words, real_url, agency, art_id)
                         
                         enriched += 1
                         if enriched % 10 == 0: log(f"Progress: {enriched} enriched, {failed} failed")
