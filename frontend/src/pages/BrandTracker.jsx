@@ -151,7 +151,8 @@ export default function BrandTracker() {
                                             <td><span className="badge badge-pending">{new Date(b.added_at).toLocaleDateString()}</span></td>
                                             <td>{b.last_scraped ? <span className="badge badge-completed">{new Date(b.last_scraped).toLocaleString()}</span> : <span className="badge badge-interrupted">Never</span>}</td>
                                             <td style={{ display: "flex", gap: "8px" }}>
-                                                <a href={`/api/brands/download/${encodeURIComponent(b.name)}`} download className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: "11px", textDecoration: "none" }}>Download</a>
+                                                <a href={`/api/brands/download/${encodeURIComponent(b.name)}`} download className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: "11px", textDecoration: "none" }}>CSV</a>
+                                                <a href={`/api/brands/download/${encodeURIComponent(b.name)}/excel`} download className="btn btn-primary" style={{ padding: "6px 12px", fontSize: "11px", textDecoration: "none" }}>Excel</a>
                                                 <button className="btn btn-danger" onClick={() => deleteBrand(b.name)} style={{ padding: "6px 12px", fontSize: "11px" }}>Remove</button>
                                             </td>
                                         </tr>

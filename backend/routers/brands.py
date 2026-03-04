@@ -114,3 +114,48 @@ async def download_brand_articles(name: str):
             media_type="text/csv",
             headers={"Content-Disposition": f"attachment; filename={name.replace(' ', '_')}_articles.csv"}
         )
+
+@router.get("/download/{name}/excel")
+async def download_brand_articles_excel(name: str):
+    """Download all articles for a specific brand as Excel."""
+    from openpyxl import Workbook
+    import io
+    async with get_db() as db:
+        articles = await db.fetch("SELECT * FROM articles WHERE sector=$1 ORDER BY published_at DESC", name)
+        
+        if not articles:
+            raise HTTPException(404, detail="No scraped articles found for this brand yet.")
+        
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Articles"
+        
+        ws.append(["ID", "Title", "URL", "Author", "Agency", "Published_At", "Word_Count", "Summary", "Body_Preview"])
+        
+        def sanitize(val):
+            if not isinstance(val, str): return val
+            return "".join(c for c in val if c.isprintable() or c in ['\n', '\r', '\t'])
+
+        for a in articles:
+            body_preview = a['full_body'][:300] + "..." if a.get('full_body') else ""
+            ws.append([
+                a['id'],
+                sanitize(a['title']),
+                sanitize(a['url']),
+                sanitize(a.get('author', '')),
+                sanitize(a.get('agency', '')),
+                sanitize(a.get('published_at', '')),
+                a.get('word_count', 0),
+                sanitize(a.get('summary', '')),
+                sanitize(body_preview)
+            ])
+            
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={name.replace(' ', '_')}_articles.xlsx"}
+        )
