@@ -6,7 +6,7 @@ venv/
 .env
 scraper.log
 backend.log
-news_scraper.db
+# news_scraper.db (now tracked)
 
 # Node
 node_modules/
