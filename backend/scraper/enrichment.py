@@ -33,7 +33,7 @@ def decode_google_news_url(url: str) -> Optional[str]:
         encoded = url.split("/articles/")[1].split("?")[0]
         padded = encoded + "=="
         decoded = base64.urlsafe_b64decode(padded)
-        match = re.search(rb"https?://[^\x00-\x1F\x7F]+", decoded)
+        match = re.search(rb"https?://[a-zA-Z0-9\-\.\_\~\:\/\?\#\[\]\@\!\$\&\'\(\)\*\+\,\;\=\%]+", decoded)
         if match:
             return match.group(0).decode("utf-8", errors="ignore")
     except Exception as e:
@@ -73,18 +73,20 @@ JUNK_PATTERNS = [
 ]
 
 def is_junk_body(body: Optional[str]) -> bool:
-    if not body or len(body.strip()) < 100: return True
-    word_count = len(body.split())
-    if word_count < 80: return True
-    body_lower = body.lower()
-    return any(pat in body_lower for pat in JUNK_PATTERNS)
+    """Extremely permissive: keep almost everything for future sentiment analysis."""
+    if not body or len(body.strip()) < 5: 
+        return True
+    return False
 
 async def resolve_redirect_url(browser, url: str) -> str:
     """Follow Google/Bing redirects to real publisher URL."""
     if "news.google.com/rss/articles/" in url:
-        return decode_google_news_url(url) or url
+        decoded = decode_google_news_url(url)
+        if decoded:
+            return decoded
+        # fallback to Playwright below if decoding fails
 
-    if "bing.com/news/apiclick" not in url:
+    if "bing.com/news/apiclick" not in url and "news.google.com/rss/articles/" not in url:
         return url
     
     context = None
@@ -226,6 +228,10 @@ async def scrape_full_data(page, url: str) -> Dict[str, str]:
         await page.route("**/*", lambda r: r.continue_() if r.request.resource_type in ("document", "xhr", "fetch") else r.abort())
         await page.goto(url, wait_until="domcontentloaded", timeout=25000)
         await page.wait_for_timeout(1500)
+    except Exception as e:
+        log(f"Navigation timeout/error {url[:50]}: {e} - Attempting partial extraction")
+        
+    try:
         html = await page.content()
         return {"text": extract_body_from_html(html), "html": html}
     except Exception as e:
@@ -245,13 +251,19 @@ async def bypass_paywall(browser, url: str) -> Dict[str, str]:
             context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
             page = await context.new_page()
             await Stealth().apply_stealth_async(page)
-            await page.goto(target, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(3000)
-            html = await page.content()
-            txt = extract_body_from_html(html)
-            if len(txt) > len(best["text"]):
-                best = {"text": txt, "html": html}
-            if len(txt) > 600: break
+            try:
+                await page.goto(target, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(3000)
+            except Exception as e:
+                log(f"Navigation timeout/error for bypass {name}: {e}")
+            try:
+                html = await page.content()
+                txt = extract_body_from_html(html)
+                if len(txt) > len(best["text"]):
+                    best = {"text": txt, "html": html}
+                if len(txt) > 600: break
+            except Exception as e:
+                log(f"Extraction error in bypass {name}: {e}")
         except Exception as e:
             log(f"Bypass {name} failed: {e}")
         finally:
@@ -267,7 +279,7 @@ async def fetch_with_paywall_bypass(browser, url: str) -> Dict[str, str]:
     res = await scrape_full_data(page, url)
     await context.close()
 
-    if not is_junk_body(res["text"]) and len(res["text"].split()) > 200:
+    if not is_junk_body(res["text"]) and len(res["text"].split()) > 20: # Reduced from 200
         return res
     
     # Bypass
@@ -279,12 +291,12 @@ async def fetch_with_paywall_bypass(browser, url: str) -> Dict[str, str]:
 
 # Removed redundant summarize_with_groq (now in llm.py)
 
-async def run_enrichment(job_id: Optional[str] = None, batch_size: int = 1000):
-    log(f"Starting enrichment. Batch size: {batch_size}")
+async def run_enrichment(job_id: Optional[str] = None, batch_size: int = 1000, concurrency: int = 8):
+    log(f"Starting enrichment. Batch size: {batch_size}, Concurrency: {concurrency}")
     async with get_db() as db:
         articles = await db.fetch("""
             SELECT id, url, title, agency FROM articles
-            WHERE full_body IS NULL OR length(full_body) < 150 OR lower(full_body) LIKE '%javascript%'
+            WHERE full_body IS NULL OR length(full_body) < 5 OR lower(full_body) LIKE '%javascript%'
             ORDER BY id DESC LIMIT $1
         """, batch_size)
     
@@ -294,7 +306,7 @@ async def run_enrichment(job_id: Optional[str] = None, batch_size: int = 1000):
 
     enriched = 0
     failed = 0
-    semaphore = asyncio.Semaphore(8) # Reduced for extreme stability
+    semaphore = asyncio.Semaphore(concurrency) 
     browser_lock = asyncio.Lock()
     
     browser_restart_needed = False
@@ -335,7 +347,9 @@ async def run_enrichment(job_id: Optional[str] = None, batch_size: int = 1000):
                         data = await fetch_with_paywall_bypass(active_browser, real_url)
                         
                         if is_junk_body(data["text"]):
-                            log(f"Failed ID:{art_id} - Junk content")
+                            word_count = len(data["text"].split())
+                            char_count = len(data["text"])
+                            log(f"Failed ID:{art_id} - Junk content ({word_count} words, {char_count} chars)")
                             failed += 1
                             return
 
@@ -353,8 +367,8 @@ async def run_enrichment(job_id: Optional[str] = None, batch_size: int = 1000):
                         if ollama_meta.get("agency"):
                             agency = ollama_meta["agency"]
                         
-                        # Use cleaned body if provided
-                        final_body = ollama_meta.get("cleaned_body", data["text"])
+                        # Using raw extracted body to speed up (LLM cleaning is slow)
+                        final_body = data["text"]
                         
                         # Double-check if agency looks like a redirector/generic
                         generic_agencies = ["google news", "bing news", "msn", "yahoo news", "google"]
@@ -362,8 +376,8 @@ async def run_enrichment(job_id: Optional[str] = None, batch_size: int = 1000):
                             log(f"Agency '{agency}' looks generic. Verifying...")
                             agency = await verify_agency_with_ollama(final_body, agency)
                         
-                        summary = await summarize_with_groq(final_body)
                         words = len(final_body.split())
+                        summary = await summarize_with_groq(final_body) if words >= 50 else None
                         
                         async with get_db() as db:
                             await db.execute("""
@@ -375,9 +389,11 @@ async def run_enrichment(job_id: Optional[str] = None, batch_size: int = 1000):
                         if enriched % 10 == 0: log(f"Progress: {enriched} enriched, {failed} failed")
                         
                     except Exception as e:
-                        err_msg = str(e)
-                        if "Target page, context or browser has been closed" in err_msg or "TargetClosed" in err_msg:
+                        err_msg = str(e).lower()
+                        # Catch connection closures, driver crashes, and socket errors to trigger a restart
+                        if any(x in err_msg for x in ["closed", "driver", "socket", "target page", "context"]):
                             browser_restart_needed = True
+                            log(f"⚠️ Browser crash detected. Queuing restart for next item...")
                         log(f"Error ID:{art_id}: {type(e).__name__}: {e}")
                         failed += 1
 

@@ -8,14 +8,61 @@ import ollama
 
 # --- Configuration ---
 GROQ_API_KEYS = [k.strip() for k in os.getenv("GROQ_API_KEY", "").split(",") if k.strip()]
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "minimax-m2:cloud")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 _ollama_semaphore = None
+_DETECTED_MODEL = None
+
+async def get_ollama_model() -> str:
+    global _DETECTED_MODEL
+    if _DETECTED_MODEL:
+        return _DETECTED_MODEL
+        
+    env_model = os.getenv("OLLAMA_MODEL")
+    client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
+    
+    try:
+        # Check if any model is currently loaded in memory
+        running = await client.ps()
+        if running and 'models' in running and len(running['models']) > 0:
+            _DETECTED_MODEL = running['models'][0]['name']
+            log(f"Detected currently loaded model: {_DETECTED_MODEL}")
+            return _DETECTED_MODEL
+            
+        # Get list of available installed models
+        models_info = await client.list()
+        if models_info and 'models' in models_info and len(models_info['models']) > 0:
+            models = [m['name'] for m in models_info['models']]
+            
+            # Map environment preference if specified
+            if env_model and any(env_model in m for m in models):
+                _DETECTED_MODEL = [m for m in models if env_model in m][0]
+                log(f"Selected env-specified model: {_DETECTED_MODEL}")
+                return _DETECTED_MODEL
+                
+            # Auto-select fallback preferences based on model families
+            for preferred in ["qwen", "llama", "mistral", "gemma"]:
+                for m in models:
+                    if preferred in m.lower():
+                        _DETECTED_MODEL = m
+                        log(f"Auto-selected preferred model: {_DETECTED_MODEL}")
+                        return _DETECTED_MODEL
+                        
+            # Return first available if no preference matches
+            _DETECTED_MODEL = models[0]
+            log(f"Selected first available model: {_DETECTED_MODEL}")
+            return _DETECTED_MODEL
+    except Exception as e:
+        log(f"Failed to auto-detect model, using fallback. Error: {e}")
+        
+    _DETECTED_MODEL = env_model if env_model else "qwen2.5:3b" # safe fallback
+    return _DETECTED_MODEL
+
 def get_ollama_semaphore():
     global _ollama_semaphore
     if _ollama_semaphore is None:
-        _ollama_semaphore = asyncio.Semaphore(4) # Throttles to max 4 concurrent LLM requests to prevent 429
+        # Increased to 10 - qwen3:4b is lightweight and can handle more concurrency
+        _ollama_semaphore = asyncio.Semaphore(10) 
     return _ollama_semaphore
 
 # --- Logging ---
@@ -88,7 +135,7 @@ async def extract_metadata_with_ollama(body: str, url: str = "", context_agency:
     Extract author, agency, and clean the body using local Ollama instance.
     Uses URL and context_agency for better accuracy.
     """
-    if not body or len(body) < 100:
+    if not body or len(body) < 10:
         return {"author": None, "agency": None, "body": body}
 
     domain = get_domain_name(url) if url else ""
@@ -101,32 +148,32 @@ async def extract_metadata_with_ollama(body: str, url: str = "", context_agency:
     - For 'Author': Look for "By [Name]", "Author: [Name]", "By [Name] [Agency]", or prominent person names at the start or end of the article.
     - For 'Agency': If not explicitly named, use the provided 'Domain' ({domain}) as a default. If multiple organizations are mentioned, identify the one that is the source of this specific article (usually mentioned at the top or in the byline).
     - If the 'Suggested Agency' ({context_agency}) is broad (e.g. Google News), try to find the specific publisher.
-    - Provide a 'cleaned_body' by removing ads, social media links, and navigational text. DO NOT SUMMARIZE.
-    - Set 'is_junk' to true if the content is mostly junk snippet/paywall.
+    - Set 'is_junk' to true if the content is mostly ads, snippets, or a paywall notice rather than the actual article content.
 
     Source Info: {context_str}
 
-    Text:
-    \"\"\"{body[:6000]}\"\"\"
+    Text Snippet (First 2000 chars):
+    \"\"\"{body[:2000]}\"\"\"
 
     Return ONLY a JSON object:
     {{
       "author": (string or null),
       "agency": (string or null),
-      "is_junk": (boolean),
-      "cleaned_body": (string)
+      "is_junk": (boolean)
     }}
     """
 
+    start_time = asyncio.get_event_loop().time()
     try:
         client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
         sem = get_ollama_semaphore()
         
         response = None
+        current_model = await get_ollama_model()
         for attempt in range(4):
             try:
                 async with sem:
-                    response = await client.chat(model=OLLAMA_MODEL, messages=[
+                    response = await client.chat(model=current_model, messages=[
                         {'role': 'user', 'content': prompt},
                     ], format='json')
                 break
@@ -137,6 +184,10 @@ async def extract_metadata_with_ollama(body: str, url: str = "", context_agency:
                     await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
                 else:
                     raise e
+                    
+        end_time = asyncio.get_event_loop().time()
+        duration = end_time - start_time
+        log(f"Ollama Meta Extraction took {duration:.2f}s")
                     
         content = response['message']['content']
         log(f"Raw Ollama Meta: {content[:100]}...")
@@ -177,8 +228,7 @@ async def extract_metadata_with_ollama(body: str, url: str = "", context_agency:
         return {
             "author": res_author,
             "agency": res_agency,
-            "is_junk": data.get("is_junk", False),
-            "cleaned_body": data.get("cleaned_body", body)
+            "is_junk": data.get("is_junk", False)
         }
     except Exception as e:
         log(f"Ollama Extraction error: {e}")
@@ -199,15 +249,17 @@ async def verify_agency_with_ollama(body: str, detected_agency: str) -> str:
     Return ONLY the agency name as a short string (e.g., "The New York Times"). 
     Do not explain or add commentary. If you cannot identify one, return '{detected_agency}'.
     """
+    start_time = asyncio.get_event_loop().time()
     try:
         client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
         sem = get_ollama_semaphore()
         
         response = None
+        current_model = await get_ollama_model()
         for attempt in range(4):
             try:
                 async with sem:
-                    response = await client.chat(model=OLLAMA_MODEL, messages=[
+                    response = await client.chat(model=current_model, messages=[
                         {'role': 'user', 'content': prompt},
                     ])
                 break
@@ -218,6 +270,8 @@ async def verify_agency_with_ollama(body: str, detected_agency: str) -> str:
                 else:
                     raise e
                     
+        end_time = asyncio.get_event_loop().time()
+        log(f"Ollama Agency Verify took {end_time - start_time:.2f}s")
         return response['message']['content'].strip()
     except Exception as e:
         log(f"Ollama agency verify error: {e}")
@@ -247,15 +301,17 @@ async def check_relevancy_with_ollama(body: str, subject: str) -> Dict[str, Any]
     - "score": (integer 0-100, where 100 is highly relevant)
     - "reason": (string, 10-word explanation)
     """
+    start_time = asyncio.get_event_loop().time()
     try:
         client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
         sem = get_ollama_semaphore()
         
         response = None
+        current_model = await get_ollama_model()
         for attempt in range(4):
             try:
                 async with sem:
-                    response = await client.chat(model=OLLAMA_MODEL, messages=[
+                    response = await client.chat(model=current_model, messages=[
                         {'role': 'user', 'content': prompt},
                     ], format='json')
                 break
@@ -266,8 +322,9 @@ async def check_relevancy_with_ollama(body: str, subject: str) -> Dict[str, Any]
                 else:
                     raise e
                     
+        end_time = asyncio.get_event_loop().time()
         content = response['message']['content']
-        log(f"Raw Ollama Relevancy: {content[:100]}...")
+        log(f"Ollama Relevancy took {end_time - start_time:.2f}s | Raw: {content[:100]}...")
         
         try:
             data = json.loads(content)

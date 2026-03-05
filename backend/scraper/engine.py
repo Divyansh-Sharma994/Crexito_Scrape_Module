@@ -27,6 +27,7 @@ import trafilatura
 from urllib.parse import quote_plus
 from db.database import get_db
 from scraper.llm import summarize_with_groq, extract_metadata_with_ollama, check_relevancy_with_ollama
+from scraper.enrichment import decode_google_news_url
 from concurrent.futures import ThreadPoolExecutor
 from playwright_stealth import Stealth
 
@@ -143,6 +144,21 @@ SECTOR_KEYWORDS = {
         "Research", "STEM", "Scholarship", "Online Learning", "IIT", "IIM", "Higher Education",
         "K-12", "Vocational Training", "Literacy", "E-learning", "Scientific Papers",
         "Student Loans", "College Admissions", "Curriculum", "Pedagogy", "Lifelong Learning",
+    ],
+    "qualcom market": [
+        "snapdragon x elite", "snapdragon x plus", "snapdragon x2 elite", "snapdragon x2 plus",
+        "snapdragon x series", "snapdragon compute", "windows on snapdragon", "copilot+ pc qualcomm",
+        "oryon cpu", "qualcomm oryon", "qualcomm ai engine", "tops",
+        "trillion operations per second", "45 tops", "80 tops", "85 tops",
+        "perf-per-watt", "perf-per-watt arm", "int8 precision", "fp16 precision",
+        "model quantization", "unified memory", "lpddr5x", "lpddr5x snapdragon",
+        "135 gb/s bandwidth", "4nm soc", "30 tokens per second", "multi-day battery life pc",
+        "thermal design power", "tdp", "openvino", "directml", "onnx", "onnx runtime",
+        "winml", "cuda", "rocm", "coreml", "hardware acceleration", "local inference",
+        "on-device inference", "edge inference", "qualcomm ai hub", "qualcomm neural processing sdk",
+        "qnn sdk", "qualcomm ai stack", "snpe", "snapdragon neural processing engine",
+        "hexagon nn", "qairt", "qualcomm ai runtime", "fastrpc", "dsp task queuing",
+        "ai pc", "artificial intellegence pc"
     ],
 }
 
@@ -288,6 +304,11 @@ async def discover_articles(
                         title = entry.get("title", "").strip()
                         if not link: continue
                         
+                        if "news.google.com/rss/articles/" in link:
+                            decoded_link = decode_google_news_url(link)
+                            if decoded_link:
+                                link = decoded_link
+                        
                         th = title_hash(title)
                         if link in seen_urls or th in seen_title_hashes:
                             continue
@@ -388,7 +409,14 @@ async def scrape_and_analyze(
     groq_client: httpx.AsyncClient, scraped_counter: list, search_mode: str = "broad"
 ):
     """Fast scrape: direct browser visit only. Paywall bypass runs later via enrichment."""
-    from scraper.enrichment import extract_body_from_html, is_junk_body, extract_author_from_html
+    from scraper.enrichment import extract_body_from_html, is_junk_body, extract_author_from_html, decode_google_news_url
+    
+    # Pre-solve Google News redirect to avoid hitting consent/bot walls
+    if "news.google.com/rss/articles/" in article["url"]:
+        decoded = decode_google_news_url(article["url"])
+        if decoded:
+            article["url"] = decoded
+
     context = None
     try:
         context = await browser.new_context(user_agent=random_ua())
@@ -401,9 +429,9 @@ async def scrape_and_analyze(
                          else r.abort())
 
         body = ""
+        # Step 1: Navigate with better wait
         try:
-            # Step 1: Navigate with better wait
-            await page.goto(article["url"], wait_until="networkidle", timeout=25000)
+            await page.goto(article["url"], wait_until="domcontentloaded", timeout=25000)
             
             # Step 2: Auto-scroll to trigger lazy loading
             await page.evaluate("""async () => {
@@ -422,7 +450,10 @@ async def scrape_and_analyze(
                 });
             }""")
             await page.wait_for_timeout(1000)
+        except Exception:
+            pass # Timeout / navigation error — might still have partial DOM
 
+        try:
             # Step 3: Extract content
             html = await page.content()
             body = extract_body_from_html(html)
@@ -433,7 +464,8 @@ async def scrape_and_analyze(
                 article["url"] = page.url
         except Exception:
             author = None
-            pass  # Timeout / navigation error — save article with empty body
+            pass 
+
 
         # Validate body — discard junk (CAPTCHA pages, bot-detection, paywalls)
         if is_junk_body(body):
@@ -442,7 +474,7 @@ async def scrape_and_analyze(
         summary = None
         agency = article["agency"]
         
-        if body and len(body) > 300:
+        if body and len(body) > 10:
             ollama_meta = await extract_metadata_with_ollama(body, url=article["url"], context_agency=article["agency"])
             
             # --- Smart Relevancy Filter ---
@@ -465,20 +497,20 @@ async def scrape_and_analyze(
                 from scraper.llm import verify_agency_with_ollama
                 agency = await verify_agency_with_ollama(body, agency)
 
-            # Use cleaned body
-            body = ollama_meta.get("cleaned_body", body)
+            # Skip redundant LLM body cleaning for speed
+            pass
 
         word_count = len(body.split()) if body else 0
 
         # Only call Groq if we got substantial content
-        if word_count >= 150:
+        if word_count >= 50:
             summary = await summarize_with_groq(body)
 
         await db.execute("""
             INSERT INTO articles (title, url, full_body, summary, agency, author, published_at, sector, region, scrape_job_id, word_count, title_hash)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (url) DO UPDATE SET
-                full_body  = CASE WHEN articles.full_body IS NULL OR length(articles.full_body) < 100 THEN excluded.full_body ELSE articles.full_body END,
+                full_body  = CASE WHEN articles.full_body IS NULL OR length(articles.full_body) < 50 THEN excluded.full_body ELSE articles.full_body END,
                 summary    = CASE WHEN articles.summary IS NULL THEN excluded.summary ELSE articles.summary END,
                 word_count = CASE WHEN articles.word_count IS NULL OR articles.word_count = 0 THEN excluded.word_count ELSE articles.word_count END,
                 author     = CASE WHEN articles.author IS NULL OR articles.author = '' THEN excluded.author ELSE articles.author END,
