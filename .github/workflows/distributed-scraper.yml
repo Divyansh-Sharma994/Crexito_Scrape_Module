@@ -1,0 +1,87 @@
+name: 🚀 Distributed Scraper Grid
+
+on:
+  workflow_dispatch:
+    inputs:
+      sector:
+        description: 'Sector to scrape (e.g., qualcom market)'
+        required: true
+        default: 'qualcom market'
+      region:
+        description: 'Region (e.g., global, india)'
+        required: true
+        default: 'global'
+      date:
+        description: 'Date to scrape (YYYY-MM-DD)'
+        required: true
+      matrix_nodes:
+        description: 'Number of worker nodes (1-20)'
+        required: true
+        default: '10'
+
+jobs:
+  discovery:
+    name: 🔍 Phase 1 - Discovery
+    runs-on: ubuntu-latest
+    outputs:
+      job_id: ${{ steps.discover.outputs.job_id }}
+      matrix_array: ${{ steps.discover.outputs.matrix_array }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+          
+      - name: Run Discovery
+        id: discover
+        working-directory: ./backend
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          OUTPUT=$(python distributed_runner.py --mode discovery --sector "${{ github.event.inputs.sector }}" --region "${{ github.event.inputs.region }}" --date "${{ github.event.inputs.date }}")
+          echo "$OUTPUT"
+          
+          JOB_ID=$(echo "$OUTPUT" | grep "JOB_ID=" | cut -d'=' -f2)
+          echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+          
+          NODES=${{ github.event.inputs.matrix_nodes }}
+          MATRIX_JSON=$(python -c "import json; print(json.dumps(list(range($NODES))))")
+          echo "matrix_array=$MATRIX_JSON" >> $GITHUB_OUTPUT
+
+  extraction:
+    name: ⚡ Phase 2 - Worker Node ${{ matrix.chunk }}
+    needs: discovery
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: ${{ fromJson(needs.discovery.outputs.matrix_array) }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+          
+      - name: Run Extraction Worker
+        working-directory: ./backend
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          python distributed_runner.py --mode worker --job_id "${{ needs.discovery.outputs.job_id }}" --index ${{ matrix.chunk }} --total ${{ github.event.inputs.matrix_nodes }}
