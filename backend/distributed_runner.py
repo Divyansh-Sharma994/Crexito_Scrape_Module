@@ -14,9 +14,12 @@ from db.database import get_db, init_db
 import httpx
 from playwright.async_api import async_playwright
 
-async def run_discovery(sector: str, region: str, day_str: str):
+from datetime import datetime, date, timedelta
+
+async def run_discovery(sector: str, region: str, date_from_str: str, date_to_str: str):
     await init_db()
-    day = date.fromisoformat(day_str)
+    date_from = date.fromisoformat(date_from_str)
+    date_to = date.fromisoformat(date_to_str)
     
     keywords = SECTOR_KEYWORDS.get(sector.lower(), [sector])
     queries = []
@@ -25,16 +28,22 @@ async def run_discovery(sector: str, region: str, day_str: str):
         for city in REGION_MAP.get(region.lower(), {}).get("cities", []): queries.append(f'"{kw}" {city}')
 
     geo = REGION_MAP.get(region.lower(), {"geo": "US"})["geo"]
-    discovered = await discover_articles(queries, day, geo)
     
-    print(f"DISCOVERY_COUNT={len(discovered)}")
+    all_discovered = []
+    current_day = date_from
+    while current_day <= date_to:
+        discovered = await discover_articles(queries, current_day, geo)
+        all_discovered.extend(discovered)
+        current_day += timedelta(days=1)
+    
+    print(f"DISCOVERY_COUNT={len(all_discovered)}")
     
     async with get_db() as db:
         job_id = f"dist-{int(datetime.now().timestamp())}"
         await db.execute("INSERT INTO scrape_jobs (id, sector, region, date_from, date_to, status, total_found) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-                         job_id, sector, region, day_str, day_str, f"discovery_complete", len(discovered))
+                         job_id, sector, region, date_from_str, date_to_str, f"discovery_complete", len(all_discovered))
         
-        for article in discovered:
+        for article in all_discovered:
             await db.execute("""
                 INSERT INTO articles (title, url, agency, published_at, sector, region, scrape_job_id)
                 VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (url) DO NOTHING
@@ -75,7 +84,8 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["discovery", "worker"], required=True)
     parser.add_argument("--sector", default="artificial intelligence")
     parser.add_argument("--region", default="india")
-    parser.add_argument("--date", default=date.today().isoformat())
+    parser.add_argument("--date_from", default=date.today().isoformat())
+    parser.add_argument("--date_to", default=date.today().isoformat())
     parser.add_argument("--job_id", help="Job ID for workers")
     parser.add_argument("--index", type=int, help="Matrix chunk index")
     parser.add_argument("--total", type=int, help="Total Matrix chunks")
@@ -83,7 +93,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     if args.mode == "discovery":
-        asyncio.run(run_discovery(args.sector, args.region, args.date))
+        asyncio.run(run_discovery(args.sector, args.region, args.date_from, args.date_to))
     elif args.mode == "worker":
         if not args.job_id: print("Error: job_id required for workers"); sys.exit(1)
         asyncio.run(run_worker(args.job_id, args.index, args.total))

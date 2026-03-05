@@ -11,8 +11,11 @@ on:
         description: 'Region (e.g., global, india)'
         required: true
         default: 'global'
-      date:
-        description: 'Date to scrape (YYYY-MM-DD)'
+      date_from:
+        description: 'Start Date (YYYY-MM-DD)'
+        required: true
+      date_to:
+        description: 'End Date (YYYY-MM-DD)'
         required: true
       matrix_nodes:
         description: 'Number of worker nodes (1-20)'
@@ -48,7 +51,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          OUTPUT=$(python distributed_runner.py --mode discovery --sector "${{ github.event.inputs.sector }}" --region "${{ github.event.inputs.region }}" --date "${{ github.event.inputs.date }}")
+          OUTPUT=$(python distributed_runner.py --mode discovery --sector "${{ github.event.inputs.sector }}" --region "${{ github.event.inputs.region }}" --date_from "${{ github.event.inputs.date_from }}" --date_to "${{ github.event.inputs.date_to }}")
           echo "$OUTPUT"
           
           JOB_ID=$(echo "$OUTPUT" | grep "JOB_ID=" | cut -d'=' -f2)
